@@ -36,6 +36,7 @@
 #include <sys/mbuf.h>
 #include <sys/protosw.h>
 #include <sys/sysctl.h>
+#include <sys/pool.h>
 #include <errno.h>
 
 #include <net/route.h>
@@ -48,7 +49,6 @@
 #include <netinet/igmp_var.h>
 #include <netinet/ip_var.h>
 #include <netinet/tcp.h>
-#include <netinet/tcpip.h>
 #include <netinet/tcp_seq.h>
 #define TCPSTATES
 #include <netinet/tcp_fsm.h>
@@ -83,12 +83,10 @@ static int sflag = 1;
 typedef int bool;
 
 struct  mbstat mbstat;
-struct pool mbpool, mclpool;
+struct kinfo_pool mbpool, mclpool;
 
-#ifdef INET6
 char	*inet6name(struct in6_addr *);
 void	inet6print(struct in6_addr *, int, char *, int);
-#endif
 
 /*
  * Dump TCP statistics structure.
@@ -100,8 +98,7 @@ tcp_stats()
 	int mib[] = { CTL_NET, AF_INET, IPPROTO_TCP, TCPCTL_STATS };
 	size_t len = sizeof(tcpstat);
 
-	if (sysctl(mib, sizeof(mib) / sizeof(mib[0]),
-	    &tcpstat, &len, NULL, 0) == -1) {
+	if (sysctl(mib, nitems(mib), &tcpstat, &len, NULL, 0) == -1) {
 		if (errno != ENOPROTOOPT)
 			printf("%% tcp_stats: sysctl: %s\n",strerror(errno));
 		return;
@@ -132,7 +129,7 @@ tcp_stats()
 	p(tcps_sndprobe, "\t\t%u window probe packet%s\n");
 	p(tcps_sndwinup, "\t\t%u window update packet%s\n");
 	p(tcps_sndctrl, "\t\t%u control packet%s\n");
-	p(tcps_outhwcsum, "\t\t%u packet%s hardware-checksummed\n");
+	p(tcps_outswcsum, "\t\t%u packet%s software-checksummed\n");
 	p(tcps_rcvtotal, "\t%u packet%s received\n");
 	p2(tcps_rcvackpack, tcps_rcvackbyte, "\t\t%u ack%s (for %qd byte%s)\n");
 	p(tcps_rcvdupack, "\t\t%u duplicate ack%s\n");
@@ -157,7 +154,7 @@ tcp_stats()
 	p1(tcps_rcvshort, "\t\t%u discarded because packet too short\n");
 	p1(tcps_rcvnosec, "\t\t%u discarded for missing IPsec protection\n");
 	p1(tcps_rcvmemdrop, "\t\t%u discarded due to memory shortage\n");
-	p(tcps_inhwcsum, "\t\t%u packet%s hardware-checksummed\n");
+	p(tcps_inswcsum, "\t\t%u packet%s software-checksummed\n");
 	p(tcps_rcvbadsig, "\t\t%u bad/missing md5 checksum%s\n");
 	p(tcps_rcvgoodsig, "\t\t%qd good md5 checksum%s\n");
 	p(tcps_connattempt, "\t%u connection request%s\n");
@@ -232,8 +229,7 @@ udp_stats()
 	int mib[] = { CTL_NET, AF_INET, IPPROTO_UDP, UDPCTL_STATS };
 	size_t len = sizeof(udpstat);
 
-	if (sysctl(mib, sizeof(mib) / sizeof(mib[0]),
-	    &udpstat, &len, NULL, 0) == -1) {
+	if (sysctl(mib, nitems(mib), &udpstat, &len, NULL, 0) == -1) {
 		if (errno != ENOPROTOOPT)
 			printf("%% udp_stats: sysctl: %s\n",strerror(errno));
 		return;
@@ -249,8 +245,8 @@ udp_stats()
 	p1(udps_badlen, "\t%lu with bad data length field\n");
 	p1(udps_badsum, "\t%lu with bad checksum\n");
 	p1(udps_nosum, "\t%lu with no checksum\n");
-	p(udps_inhwcsum, "\t%lu input packet%s hardware-checksummed\n");
-	p(udps_outhwcsum, "\t%lu output packet%s hardware-checksummed\n");
+	p(udps_inswcsum, "\t%lu input packet%s software-checksummed\n");
+	p(udps_outswcsum, "\t%lu output packet%s software-checksummed\n");
 	p1(udps_noport, "\t%lu dropped due to no socket\n");
 	p(udps_noportbcast, "\t%lu broadcast/multicast datagram%s dropped due to no socket\n");
 	p1(udps_nosec, "\t%lu dropped due to missing IPsec protection\n");
@@ -280,8 +276,7 @@ ip_stats()
 	int mib[] = { CTL_NET, AF_INET, IPPROTO_IP, IPCTL_STATS };
 	size_t len = sizeof(ipstat);
 
-	if (sysctl(mib, sizeof(mib) / sizeof(mib[0]),
-	    &ipstat, &len, NULL, 0) == -1) {
+	if (sysctl(mib, nitems(mib), &ipstat, &len, NULL, 0) == -1) {
 		if (errno != ENOPROTOOPT)
 			printf("%% ip_stats: sysctl: %s\n",strerror(errno));
 		return;
@@ -323,8 +318,8 @@ ip_stats()
 	p(ips_toolong, "\t%lu packet%s with ip length > max ip packet size\n");
 	p(ips_nogif, "\t%lu tunneling packet%s that can't find gif\n");
 	p(ips_badaddr, "\t%lu datagram%s with bad address in header\n");
-	p(ips_inhwcsum, "\t%lu input datagram%s checksum-processed by hardware\n");
-	p(ips_outhwcsum, "\t%lu output datagram%s checksum-processed by hardware\n");
+	p(ips_inswcsum, "\t%lu input datagram%s software-checksummed\n");
+	p(ips_outswcsum, "\t%lu output datagram%s software-checksummed\n");
 	p(ips_notmember, "\t%lu multicast packet%s which we don't join\n");
 #undef p
 #undef p1
@@ -385,8 +380,7 @@ icmp_stats()
 	int mib[] = { CTL_NET, AF_INET, IPPROTO_ICMP, ICMPCTL_STATS };
 	size_t len = sizeof(icmpstat);
 
-	if (sysctl(mib, sizeof(mib) / sizeof(mib[0]),
-	    &icmpstat, &len, NULL, 0) == -1) {
+	if (sysctl(mib, nitems(mib), &icmpstat, &len, NULL, 0) == -1) {
 		if (errno != ENOPROTOOPT)
 			printf("%% icmp_stats: sysctl: %s\n",strerror(errno));
 		return;
@@ -442,8 +436,7 @@ igmp_stats()
 	int mib[] = { CTL_NET, AF_INET, IPPROTO_IGMP, IGMPCTL_STATS };
 	size_t len = sizeof(igmpstat);
 
-	if (sysctl(mib, sizeof(mib) / sizeof(mib[0]),
-	    &igmpstat, &len, NULL, 0) == -1) {
+	if (sysctl(mib, nitems(mib), &igmpstat, &len, NULL, 0) == -1) {
 		if (errno != ENOPROTOOPT)
 			printf("%% igmp_stats: sysctl: %s\n",strerror(errno));
 		return;
@@ -478,8 +471,7 @@ ah_stats()
 	int mib[] = { CTL_NET, AF_INET, IPPROTO_AH, AHCTL_STATS };
 	size_t len = sizeof(ahstat);
 
-	if (sysctl(mib, sizeof(mib) / sizeof(mib[0]),
-	    &ahstat, &len, NULL, 0) == -1) {
+	if (sysctl(mib, nitems(mib), &ahstat, &len, NULL, 0) == -1) {
 		if (errno != ENOPROTOOPT)
 			printf("%% ah_stats: sysctl: %s\n",strerror(errno));
                 return;
@@ -525,8 +517,7 @@ esp_stats()
 	int mib[] = { CTL_NET, AF_INET, IPPROTO_ESP, ESPCTL_STATS };
 	size_t len = sizeof(espstat);
 
-	if (sysctl(mib, sizeof(mib) / sizeof(mib[0]),
-	    &espstat, &len, NULL, 0) == -1) {
+	if (sysctl(mib, nitems(mib), &espstat, &len, NULL, 0) == -1) {
 		if (errno != ENOPROTOOPT)
 			printf("%% esp_stats: sysctl: %s\n",strerror(errno));
 		return;
@@ -573,8 +564,7 @@ ipip_stats()
 	int mib[] = { CTL_NET, AF_INET, IPPROTO_IPIP, IPIPCTL_STATS };
 	size_t len = sizeof(ipipstat);
 
-	if (sysctl(mib, sizeof(mib) / sizeof(mib[0]),
-	    &ipipstat, &len, NULL, 0) == -1) {
+	if (sysctl(mib, nitems(mib), &ipipstat, &len, NULL, 0) == -1) {
 		if (errno != ENOPROTOOPT)
 			printf("%% ipip_stats: sysctl: %s\n",strerror(errno));
 		return;
@@ -585,16 +575,16 @@ ipip_stats()
 #define p(f, m) if (ipipstat.f || sflag <= 1) \
     printf(m, ipipstat.f, plural(ipipstat.f))
 
-	p(ipips_ipackets, "\t%u total input packet%s\n");
-	p(ipips_opackets, "\t%u total output packet%s\n");
-	p(ipips_hdrops, "\t%u packet%s shorter than header shows\n");
-	p(ipips_pdrops, "\t%u packet%s dropped due to policy\n");
-	p(ipips_spoof, "\t%u packet%s with possibly spoofed local addresses\n");
-	p(ipips_qfull, "\t%u packet%s were dropped due to full output queue\n");
+	p(ipips_ipackets, "\t%llu total input packet%s\n");
+	p(ipips_opackets, "\t%llu total output packet%s\n");
+	p(ipips_hdrops, "\t%llu packet%s shorter than header shows\n");
+	p(ipips_pdrops, "\t%llu packet%s dropped due to policy\n");
+	p(ipips_spoof, "\t%llu packet%s with possibly spoofed local addresses\n");
+	p(ipips_qfull, "\t%llu packet%s were dropped due to full output queue\n");
 	p(ipips_ibytes, "\t%qu input byte%s\n");
 	p(ipips_obytes, "\t%qu output byte%s\n");
-	p(ipips_family, "\t%u protocol family mismatche%s\n");
-	p(ipips_unspec, "\t%u attempts to use tunnel with unspecified endpoint%s\n");
+	p(ipips_family, "\t%llu protocol family mismatche%s\n");
+	p(ipips_unspec, "\t%llu attempts to use tunnel with unspecified endpoint%s\n");
 #undef p
 }
 
@@ -608,8 +598,7 @@ carp_stats()
 	int mib[] = { CTL_NET, AF_INET, IPPROTO_CARP, CARPCTL_STATS };
 	size_t len = sizeof(carpstat);
 
-	if (sysctl(mib, sizeof(mib) / sizeof(mib[0]),
-	    &carpstat, &len, NULL, 0) == -1) {
+	if (sysctl(mib, nitems(mib), &carpstat, &len, NULL, 0) == -1) {
 		if (errno != ENOPROTOOPT)
 			printf("%% carp_stats: sysctl: %s\n",strerror(errno));
 		return;
@@ -650,8 +639,7 @@ pfsync_stats()
 	int mib[] = { CTL_NET, AF_INET, IPPROTO_PFSYNC, PFSYNCCTL_STATS };
 	size_t len = sizeof(pfsyncstat);
 
-	if (sysctl(mib, sizeof(mib) / sizeof(mib[0]),
-	    &pfsyncstat, &len, NULL, 0) == -1) {
+	if (sysctl(mib, nitems(mib), &pfsyncstat, &len, NULL, 0) == -1) {
 		if (errno != ENOPROTOOPT)
 			printf("%% pfsync_stats: sysctl: %s\n",strerror(errno));
 		return;
@@ -692,8 +680,7 @@ ipcomp_stats()
 	int mib[] = { CTL_NET, AF_INET, IPPROTO_IPCOMP, IPCOMPCTL_STATS };
 	size_t len = sizeof(ipcompstat);
 
-	if (sysctl(mib, sizeof(mib) / sizeof(mib[0]),
-	    &ipcompstat, &len, NULL, 0) == -1) {
+	if (sysctl(mib, nitems(mib), &ipcompstat, &len, NULL, 0) == -1) {
 		if (errno != ENOPROTOOPT)
 			printf("%% ipcomp_stats: sysctl: %s\n",strerror(errno));
 		return;
@@ -734,8 +721,7 @@ rt_stats()
  	int mib[] = { CTL_NET, PF_ROUTE, 0, 0, NET_RT_STATS, 0 };
  	size_t size = sizeof (rtstat);
  
-	if (sysctl(mib, sizeof(mib) / sizeof(mib[0]), &rtstat, &size,
-	    NULL, 0) < 0) {
+	if (sysctl(mib, nitems(mib), &rtstat, &size, NULL, 0) < 0) {
 		printf("%% rt_stats: sysctl: %s\n", strerror(errno));
 		return;
 	}
@@ -788,11 +774,13 @@ mbpr(void)
 	int totmem, totused, totmbufs, totpct;
 	int i, mib[4], npools, flag = 0;
 	bool seen[256];
-	struct pool pool;
+	struct kinfo_pool pool;
 	struct mbtypes *mp;
 	size_t size;
 	int page_size = getpagesize();
 	int nmbtypes = sizeof(mbstat.m_mtypes) / sizeof(short);
+
+	memset(&seen, 0, sizeof(seen));
 
 	if (nmbtypes != 256) {
 		printf("%% mbpr: unexpected change to mbstat; check source\n");
@@ -825,7 +813,7 @@ mbpr(void)
 		mib[1] = KERN_POOL;
 		mib[2] = KERN_POOL_POOL;
 		mib[3] = i;
-		size = sizeof(struct pool);
+		size = sizeof(struct kinfo_pool);
 		if (sysctl(mib, 4, &pool, &size, NULL, 0) < 0) {
 			if (errno == ENOENT)
 				continue;
@@ -843,12 +831,12 @@ mbpr(void)
 		}
 
 		if (!strncmp(name, "mbpl", strlen("mbpl"))) {
-			bcopy(&pool, &mbpool, sizeof(struct pool));
+			bcopy(&pool, &mbpool, sizeof(struct kinfo_pool));
 			flag++;
 		} else {
 			if (!strncmp(name, "mclpl", strlen("mclpl"))) {
 				bcopy(&pool, &mclpool,
-				    sizeof(struct pool));
+				    sizeof(struct kinfo_pool));
 				flag++;
 			}
 		}

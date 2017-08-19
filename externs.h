@@ -2,8 +2,9 @@
  * nsh externs, prototypes and macros
  */
 
-#define NO_ARG(x) (strcasecmp(x, "no") == 0) /* absolute "no" */
-#define MIN_ARG(x,y) (strncasecmp(x, y, strlen(y)) == 0) /* mabye arg y */
+#define NO_ARG(x)	(strcasecmp(x, "no") == 0) /* absolute "no" */
+
+#define nitems(_a)	(sizeof((_a)) / sizeof((_a)[0])) /* sys/param.h */
 
 struct rtdump {
 	char *buf;	/* start of routing table */
@@ -12,8 +13,8 @@ struct rtdump {
 
 extern char *__progname;	/* duh */
 extern char *vers;		/* the version of nsh */
-extern char saveline[256];	/* command line */
-extern char line[256];		/* command line for makeargv() */
+extern char saveline[1024];	/* command line */
+extern char line[1024];		/* command line for makeargv() */
 extern int  margc;		/* makeargv() arg count */
 extern char *margv[];		/* makeargv() args */
 extern int verbose;		/* is verbose mode on? */
@@ -35,6 +36,24 @@ extern HistEvent ev;		/* ev */
 #define	DEFAULT_TTL	64		/* net.inet.ip.defttl */
 #define DEFAULT_MTTL	255		/* net.mpls.ttl */
 #define ESP_UDPENCAP_PORT 4500		/* net.inet.esp.udpencap_port */
+
+/* nopt.c */
+#define no_arg		1
+#define req_arg		2
+struct nopts {
+	char *name;
+	int type;
+	int arg;
+};
+extern int noptind;
+extern char *nopterr;
+int nopt(int, char **, struct nopts *);
+
+/* ppp.c */
+int intsppp(char *, int, int, char **);
+int intpppoe(char *, int, int, char **);
+void conf_pppoe(FILE *, int, char *);
+void conf_sppp(FILE *, int, char *);
 
 /* conf.c */
 #define LEASEPREFIX	"/var/db/dhclient.leases"
@@ -68,11 +87,10 @@ char *any_ntoa(const struct sockaddr *);
 
 /* routesys.c */
 #ifdef _NET_ROUTE_H_
-struct m_rtmsg {
-        struct  rt_msghdr m_rtm;
-        char    m_space[512];
-};
-extern struct m_rtmsg m_rtmsg;
+struct {
+	struct	rt_msghdr m_rtm;
+	char	m_space[512];
+} m_rtmsg;
 #endif
 #ifdef _WANT_SO_
 union   sockunion {
@@ -109,6 +127,7 @@ extern char metricnames[];
 #define PFCONF_TEMP	"/var/run/pf.conf"
 #define OSPFCONF_TEMP	"/var/run/ospfd.conf"
 #define OSPF6CONF_TEMP	"/var/run/ospf6d.conf"
+#define EIGRPCONF_TEMP	"/var/run/eigrpd.conf"
 #define BGPCONF_TEMP	"/var/run/bgpd.conf"
 #define RIPCONF_TEMP	"/var/run/ripd.conf"
 #define LDPCONF_TEMP	"/var/run/ldpd.conf"
@@ -134,6 +153,8 @@ extern char metricnames[];
 #define SMTPCONF_TEMP 	"/var/run/smtpd.conf"
 #define LDAPCONF_TEMP	"/var/run/ldapd.conf"
 #define IFSTATECONF_TEMP "/var/run/ifstated.conf"
+#define MOTD_TEMP "/var/run/motd"
+
 /* argument list replacement */
 #define OPT     (void *)1
 #define REQ     (void *)2
@@ -146,6 +167,7 @@ void rmtemp(char *);
 #define PFCTL		"/sbin/pfctl"
 #define OSPFCTL		"/usr/sbin/ospfctl"
 #define OSPF6CTL	"/usr/sbin/ospf6ctl"
+#define EIGRPCTL	"/usr/sbin/eigrpctl"
 #define BGPCTL		"/usr/sbin/bgpctl"
 #define RIPCTL		"/usr/sbin/ripctl"
 #define LDPCTL		"/usr/sbin/ldpctl"
@@ -162,7 +184,11 @@ struct ctl {
 	char *args[32];
 	void (*handler)();
 	int flag_x;
+	int type;
 };
+#define	T_HANDLER	1
+#define T_HANDLER_FILL1	2
+#define	T_EXEC		3
 struct daemons {
         char *name;
 	char *propername;
@@ -176,6 +202,7 @@ extern struct daemons ctl_daemons[];
 extern struct ctl ctl_pf[];
 extern struct ctl ctl_ospf[];
 extern struct ctl ctl_ospf6[];
+extern struct ctl ctl_eigrp[];
 extern struct ctl ctl_relay[];
 extern struct ctl ctl_bgp[];
 extern struct ctl ctl_rip[];
@@ -198,6 +225,7 @@ extern struct ctl ctl_tftp[];
 extern struct ctl ctl_dns[];
 extern struct ctl ctl_inet[];
 extern struct ctl ctl_ldap[];
+extern struct ctl ctl_motd[];
 void flag_x(char *, char *, int, char *);
 
 /* commands.c */
@@ -213,8 +241,9 @@ void flag_x(char *, char *, int, char *);
 #define SSH		"/usr/bin/ssh"
 #define PKILL		"/usr/bin/pkill"
 #define SAVESCRIPT	"/usr/local/bin/save.sh"
-/* tmp config locations */
-#define DHCPDB          "/var/db/dhcpd.leases"
+#ifndef DHCPLEASES
+#define DHCPLEASES	"/var/db/dhcpd.leases"
+#endif
 void command(void);
 char **step_optreq(char **, char **, int, char **, int);
 int argvtostring(int, char **, char *, int);
@@ -273,6 +302,8 @@ struct ghs {
 
 extern Command cmdtab[];
 extern struct intlist Intlist[];
+extern struct intlist Bridgelist[];
+extern struct intlist *whichlist;
 
 /* ieee80211.c */
 #define NWID 0
@@ -325,9 +356,10 @@ void conf_sysctls(FILE *);
 #define ASSUME_NETMASK 1
 int route(int, char**);
 void show_route(char *, int);
+int is_ip_addr(char *);
 #ifdef _IP_T_
 void parse_ip_pfx(char *, int, ip_t *);
-int ip_route(ip_t *, ip_t *, u_short, int, int);
+int ip_route(ip_t *, ip_t *, u_short, int, int, struct rt_metrics, int inits);
 #endif
 #ifdef _NETINET6_IN6_H_
 int parse_ipv6(char *, struct in6_addr *);
@@ -336,12 +368,14 @@ int parse_ipv6(char *, struct in6_addr *);
 /* if.c */
 #define DHCLIENT	"/sbin/dhclient"
 #define DHCRELAY	"/usr/sbin/dhcrelay"
+#define RTADVD		"/usr/sbin/rtadvd"
 #define IFDATA_MTU 1		/* request for if_data.ifi_mtu */
 #define IFDATA_BAUDRATE 2	/* request for if_data.ifi_baudrate */
 #define MBPS(bps) (bps / 1000 / 1000)
 #define ROUNDMBPS(bps) ((float)bps == ((bps / 1000 / 1000) * 1000 * 1000))
 #define ROUNDKBPS(bps) ((float)bps == ((bps / 1000) * 1000))
 #define ROUNDKBYTES(bytes) ((float)bytes == ((bytes / 1024) * 1024))
+void imr_init(char *);
 int is_valid_ifname(char *);
 int show_int(int, char **);
 int get_rdomain(int, char *);
@@ -355,13 +389,15 @@ u_int32_t in4_brdaddr(u_int32_t, u_int32_t);
 int intip(char *, int, int, char **);
 int intmtu(char *, int, int, char **);
 int intkeepalive(char *, int, int, char **);
-int intlabel(char *, int, int, char **);
+int intmpelabel(char *, int, int, char **);
 int intrdomain(char *, int, int, char **);
 int intdhcrelay(char *, int, int, char **);
 int intmetric(char *, int, int, char **);
+int intrtd(char *, int, int, char **);
 int intvlan(char *, int, int, char **);
 int intflags(char *, int, int, char **);
 int intxflags(char *, int, int, char **);
+int intaf(char *, int, int, char **);
 int intlink(char *, int, int, char **);
 int intnwid(char *, int, int, char **);
 int intpowersave(char *, int, int, char **);
@@ -370,6 +406,11 @@ int intpflow(char *, int, int, char **);
 int intlladdr(char *, int, int, char **);
 int intgroup(char *, int, int, char **);
 int intrtlabel(char *, int, int, char **);
+int intparent(char *, int, int, char **);
+int intpatch(char *, int, int, char **);
+int intmpw(char *, int, int, char **);
+int addaf(char *, int, int);
+int removeaf(char *, int, int);
 char *get_hwdaddr(char *);
 
 /* main.c */
@@ -401,12 +442,16 @@ int flush_bridgerule(char *, char*);
 
 /* tunnel.c */
 int inttunnel(char *, int, int, char **);
+int intvnetid(char *, int, int, char **);
+int get_physrtable(int, char *);
+int get_physttl(int, char *);
+int get_vnetid(int, char *);
 
 /* media.c */
 #define DEFAULT_MEDIA_TYPE	"autoselect"
 void media_status(int, char *, char *);
 void media_supported(int, char *, char *, char *);
-int phys_status(int, char *, char *, char *, int, int, int *);
+int phys_status(int, char *, char *, char *, int, int);
 int intmedia(char *, int, int, char **);
 int intmediaopt(char *, int, int, char **);
 int conf_media_status(FILE *, int, char *);
@@ -446,13 +491,12 @@ void show_trunk(int ifs, char *ifname);
 /* who.c */
 int who(int, char **);
 
-/* timeslot.c */
-int inttimeslot(char *, int, int, char **);
-int timeslot_status(int, char *, char *, int);
-
 /* arp.c */
 int arpget(const char *);
 int arpset(int, char **);
+void arpdump(void);
+void conf_arp(FILE *, char *);
+char *sec2str(time_t);
 
 /* more.c */
 int more(char *);
@@ -464,10 +508,6 @@ extern struct winsize winsize;
 #endif
 
 /* complete.c */
-#ifdef _HISTEDIT_H_
-unsigned char complt_c(EditLine *, int);
-unsigned char complt_i(EditLine *, int);
-#endif
 #define CMPL(x) __STRING(x),
 #define CMPL0   "",
 void inithist(void);
@@ -505,3 +545,12 @@ int db_select_flag_x_ctl_rtable(StringList *, char *, int);
 int db_select_flag_x_data_ctl_rtable(StringList *, char *, char *, int);
 #endif
 int db_select_flag_x_dbflag_rtable(char *, char *, int);
+
+/* pflow.c */
+#define PFLOW_SENDER 0
+#define PFLOW_RECEIVER 1
+#define PFLOW_VERSION 2
+#ifdef _SYS_SOCKET_H_
+int pflow_addr(const char *, struct sockaddr_storage *);
+#endif
+int pflow_status(int, int, char *, char *);

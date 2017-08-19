@@ -12,11 +12,6 @@
  * 2. Redistributions in binary form must reproduce the above copyright
  *    notice, this list of conditions and the following disclaimer in the
  *    documentation and/or other materials provided with the distribution.
- * 3. All advertising materials mentioning features or use of this software
- *    must display the following acknowledgement:
- *	This product includes software developed by Christos Zoulas.
- * 4. The name of the author may not be used to endorse or promote products
- *    derived from this software without specific prior written permission.
  *
  * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS
  * OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
@@ -67,7 +62,8 @@ sl_add(StringList *sl, char *name)
 {
 	if (sl->sl_cur == sl->sl_max - 1) {
 		sl->sl_max += _SL_CHUNKSIZE;
-		sl->sl_str = realloc(sl->sl_str, sl->sl_max * sizeof(char *));
+		sl->sl_str = reallocarray(sl->sl_str, sl->sl_max,
+		    sizeof(char *));
 		if (sl->sl_str == NULL)
 			err(1, "stringlist");
 	}

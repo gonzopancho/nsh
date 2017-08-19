@@ -10,8 +10,9 @@ if [ ! -f "$1" ]; then
   exit
 fi
 
-mount -o rw,noatime /dev/wd0a /
+rw
 cp $1 /etc/nshrc
-#cp /var/run/pf.conf /etc/pf.conf
 sync
-mount -o ro /dev/wd0a /
+ro
+#
+# for flashrd, use save-rw.sh and copy to /flash/nshrc

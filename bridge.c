@@ -824,7 +824,7 @@ bridge_list(int s, char *brdg, char *delim, char *br_str, int str_len, int type)
 			}
 			break;
 		case MEMBER:
-			if (reqp->ifbr_ifsname) {
+			if (reqp->ifbr_ifsname[0] != '\0') {
 				snprintf(buf, sizeof(buf), "%s ",
 				    reqp->ifbr_ifsname);
 				strlcat(br_str, buf, str_len);
@@ -1287,7 +1287,6 @@ bridge_rules(int s, char *brdg, char *ifname, char *delim, FILE *output)
 			break;
 		len *= 2;
 	}
-	ifrp = ifc.ifbrl_req;
 	for (i = 0; i < ifc.ifbrl_len; i += sizeof(ifreq)) {
 		ifrp = (struct ifbrlreq *)((caddr_t)ifc.ifbrl_req + i);
 		bridge_showrule(ifrp, delim, output);

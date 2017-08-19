@@ -111,6 +111,18 @@ struct prot1 os6cs[] = {
 	{ 0, 0, { 0 } }
 };
 
+struct prot1 eics[] = {
+	{ "interfaces",	"Interface",
+	    { EIGRPCTL, "show", "interfaces", OPT, OPT, NULL } },
+	{ "neighbor",	"Neighbor",
+	    { EIGRPCTL, "show", "neighbor", OPT, OPT, NULL } },
+	{ "topology",	"Topology",
+	    { EIGRPCTL, "show", "topology", OPT, OPT, NULL } },
+	{ "traffic",	"Traffic",
+	    { EIGRPCTL, "show", "traffic", OPT, OPT, NULL } },
+	{ 0, 0, { 0 } }
+};
+
 struct prot1 rics[] = {
 	{ "fib",        "Forward Information Base",
 	    { RIPCTL, "show", "fib", OPT, NULL } },
@@ -128,10 +140,22 @@ struct prot1 lics[] = {
 	    { LDPCTL, "show", "fib", OPT, NULL } },
 	{ "interfaces", "Interfaces",
 	    { LDPCTL, "show", "interfaces", NULL } },
-	{ "neighbor",   "Neighbor",
+	{ "neighbor",   "Neighbors",
 	    { LDPCTL, "show", "neighbor", NULL } },
 	{ "lib",        "Label Information Base",
 	    { LDPCTL, "show", "lib", NULL } },
+	{ "discovery",	"Adjacencies",
+	    { LDPCTL, "show", "discovery", NULL } },
+	{ "l2vpn",	"Pseudowire",
+	    { LDPCTL, "show", "l2vpn", OPT, NULL } },
+	{ 0, 0, { 0 } }
+};
+
+struct prot1 iscs[] = {
+	{ "flows",	"Display IPsec flows",
+	    { IPSECCTL, "-sf", NULL } },
+	{ "sadb",	"Display SADB",
+	    { IPSECCTL, "-ss", NULL } },
 	{ 0, 0, { 0 } }
 };
 
@@ -199,6 +223,7 @@ struct prot prots[] = {
 	{ "ospf6",	os6cs },
 	{ "rip",	rics },
 	{ "ike",	ikcs },
+	{ "ipsec",	iscs },
 	{ "ldp",	lics },
 	{ "dvmrp",	dvcs },
 	{ "relay",	rlcs },

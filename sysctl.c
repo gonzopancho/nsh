@@ -39,6 +39,8 @@
 
 #define	MIB_STOP	INT_MAX
 
+#define IFQ_MAXLEN	256
+
 void conf_sysctl(FILE *, char *, struct ipsysctl *);
 
 /*
@@ -66,8 +68,14 @@ sysctl_int(int mib[], int val, int read)
 			break;
 
 	if (sysctl(mib, i, &old, &len, valp, sizeof(int)) == -1) {
-		if (read && errno != ENOPROTOOPT)
+		if (read && errno != ENOPROTOOPT) {
 			printf("%% sysctl_int: sysctl: %s\n", strerror(errno));
+			for (i = 0; i < 6; i++) {
+				printf("%% mib[%i] == %i\n",i,mib[i]);
+		                if (mib[i] == MIB_STOP)
+					break;
+			}
+		}
 		return(-1);
 	}
 
@@ -105,6 +113,10 @@ struct ipsysctl ipsysctls[] = {
 { "send-redirects",	{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_SENDREDIRECTS, MIB_STOP, 0 },	0, 0	},
 { "directed-broadcast",	{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_DIRECTEDBCAST, MIB_STOP, 0 },	0, 1	},
 { "multipath",		{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_MULTIPATH, MIB_STOP, 0 },		0, 1	},
+#ifdef IPCTL_ARPTIMEOUT		/* 6.0+ */
+{ "arptimeout",		{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_ARPTIMEOUT, MIB_STOP, 0 },        262144, 0 },
+{ "arpdown",		{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_ARPDOWN, MIB_STOP, 0 },           262144, 0 },
+#endif
 #ifdef notyet
 { "default-mtu",	{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_DEFMTU, MIB_STOP, 0 },		DEFAULT_MTU, 0 },
 #endif
@@ -116,16 +128,13 @@ struct ipsysctl ip6sysctls[] = {
 { "forwarding",		{ CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_FORWARDING, MIB_STOP, 0 },	0, 1    },
 { "multipath",		{ CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_MULTIPATH, MIB_STOP, 0 },	0, 1	},
 { "mforwarding",	{ CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_MFORWARDING, MIB_STOP, 0 },	0, 1	},
-{ "v6only",		{ CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_V6ONLY, MIB_STOP, 0 },	0, 0	},
-{ "maxifprefixes",	{ CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_MAXIFPREFIXES, MIB_STOP, 0 }, DEFAULT_MAXIFPREFIXES, 0	},
-{ "maxifdefrouters",	{ CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_MAXIFDEFROUTERS, MIB_STOP, 0 }, DEFAULT_MAXIFDEFROUTERS, 0 },
 { "maxdynroutes", 	{ CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_MAXDYNROUTES, MIB_STOP, 0 },	DEFAULT_MAXDYNROUTES, 0 },
+{ "ifq-maxlen",		{ CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_IFQUEUE, IFQCTL_MAXLEN, MIB_STOP }, IFQ_MAXLEN, 0 },
 { 0, { 0, 0, 0, 0, 0, 0 }, 0, 0 }
 };
 
 struct ipsysctl mplssysctls[] = {
 { "ttl",		{ CTL_NET, PF_MPLS, MPLSCTL_DEFTTL, MIB_STOP, 0 },			DEFAULT_MTTL, 0	},
-{ "ifq-maxlen",		{ CTL_NET, PF_MPLS, MPLSCTL_IFQUEUE, IFQCTL_MAXLEN, MIB_STOP, 0 },	IFQ_MAXLEN, 0	},
 { "mapttl-ip",		{ CTL_NET, PF_MPLS, MPLSCTL_MAPTTL_IP, MIB_STOP, 0 },			0, 0	},
 { "mapttl-ip6",		{ CTL_NET, PF_MPLS, MPLSCTL_MAPTTL_IP6, MIB_STOP, 0 },			0, 1	},
 { 0, { 0, 0, 0, 0, 0, 0 }, 0, 0 }
@@ -140,6 +149,10 @@ struct ipsysctl ddbsysctls[] = {
 
 struct ipsysctl pipexsysctls[] = {
 { "enable",		{ CTL_NET, PF_PIPEX, PIPEXCTL_ENABLE, MIB_STOP, 0 },			0, 1	},
+{ "inq-maxlen",		{ CTL_NET, PF_PIPEX, PIPEXCTL_INQ, IFQCTL_MAXLEN, MIB_STOP, 0 },
+		IFQ_MAXLEN, 0 },
+{ "outq-maxlen",	{ CTL_NET, PF_PIPEX, PIPEXCTL_OUTQ, IFQCTL_MAXLEN, MIB_STOP, 0 },
+		IFQ_MAXLEN, 0 },
 { 0, { 0, 0, 0, 0, 0, 0 }, 0, 0 }
 };
 
@@ -201,7 +214,7 @@ conf_sysctl(FILE *output, char *prefix, struct ipsysctl *x)
 {
 	int tmp = 0;
 
-	for (; x != NULL && x->name != NULL; tmp = 0, x++) {
+	for (; x != NULL && x->name != NULL; x++) {
 		if (x->def_larg) {	/* this sysctl takes a value */
 			tmp = sysctl_int(x->mib, 0, 1);
 			if (tmp == x->def_larg || tmp == -1)

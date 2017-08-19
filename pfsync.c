@@ -27,6 +27,7 @@
 #include <arpa/inet.h>
 #include <net/if.h>
 #include <net/pfvar.h>
+#include <netinet/ip_ipsp.h>
 #include <net/if_pfsync.h>
 #include "externs.h"
 
@@ -55,7 +56,7 @@ intsyncdev(char *ifname, int ifs, int argc, char **argv)
 		return (0);
 	}
 
-	if (!MIN_ARG(ifname, "pfsync")) {
+	if (!isprefix("pfsync", ifname)) {
 		printf("%% syncdev is only for pfsync devices\n");
 		return 0;
 	}
@@ -112,7 +113,7 @@ intsyncpeer(char *ifname, int ifs, int argc, char **argv)
 	argc--;
 	argv++;
 
-	if (!MIN_ARG(ifname, "pfsync")) {
+	if (!isprefix("pfsync", ifname)) {
 		printf("%% syncpeer is only for pfsync devices\n");
 		return 0;
 	}
@@ -125,43 +126,44 @@ intsyncpeer(char *ifname, int ifs, int argc, char **argv)
 
 	bzero(&preq, sizeof(struct pfsyncreq));
 	ifr.ifr_data = (caddr_t) &preq;
+	strlcpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
 
 	if (ioctl(ifs, SIOCGETPFSYNC, (caddr_t)&ifr) == -1) {
-		if (errno == ENXIO)
-			printf("%% peer device (syncdev) not yet configured\n");
-		else
 			printf("%% intsyncpeer: SIOCGETPFSYNC: %s\n",
 			    strerror(errno));
 		return(0);
 	}
 
-	bzero(&hints, sizeof(hints));
-	hints.ai_family = AF_INET;
-	hints.ai_socktype = SOCK_DGRAM;
+	if (set) {
+		bzero(&hints, sizeof(hints));
+		hints.ai_family = AF_INET;
+		hints.ai_socktype = SOCK_DGRAM;
 
-	if ((ecode = getaddrinfo(argv[0], NULL, &hints, &peerres)) != 0) {
-		printf("%% error in parsing address string: %s\n",
-		    gai_strerror(ecode));
-		return 0;
-	}
+		if ((ecode = getaddrinfo(argv[0], NULL, &hints, &peerres)) != 0)
+		{
+			printf("%% error in parsing address string: %s\n",
+			    gai_strerror(ecode));
+			return 0;
+		}
 
-	if (peerres->ai_addr->sa_family != AF_INET) {
-		printf("%% only IPv4 addresses supported for syncpeer\n");
-		freeaddrinfo(peerres);
-		return 0;
-	}
-	if (set)
+		if (peerres->ai_addr->sa_family != AF_INET) {
+			printf("%% only IPv4 allowed for syncpeer\n");
+			freeaddrinfo(peerres);
+			return 0;
+		}
 		preq.pfsyncr_syncpeer.s_addr = ((struct sockaddr_in *)
 		    peerres->ai_addr)->sin_addr.s_addr;
-	else
+	} else {
 		preq.pfsyncr_syncpeer.s_addr = 0;
+	}
 
 	if (ioctl(ifs, SIOCSETPFSYNC, (caddr_t)&ifr) == -1) {
 			printf("%% intsyncpeer: SIOCSETPFSYNC: %s\n",
 			    strerror(errno));
 	}
 
-	freeaddrinfo(peerres);
+	if (set)
+		freeaddrinfo(peerres);
 
 	return 0;
 }
@@ -236,7 +238,11 @@ conf_pfsync(FILE *output, int s, char *ifname)
 	if (ioctl(s, SIOCGETPFSYNC, (caddr_t) & ifr) == -1)
 		return (0);
 
-	if (preq.pfsyncr_syncpeer.s_addr != INADDR_PFSYNC_GROUP)
+	/* syncdev must be first */
+	if (preq.pfsyncr_syncdev[0] != '\0')
+		fprintf(output, " syncdev %s\n", preq.pfsyncr_syncdev);
+	/* syncpeer */
+	if (preq.pfsyncr_syncpeer.s_addr != htonl(INADDR_PFSYNC_GROUP))
 		fprintf(output, " syncpeer %s\n", inet_ntoa(
 		    preq.pfsyncr_syncpeer));
 	if (preq.pfsyncr_maxupdates != PFSYNC_MAXUPDATES || preq.pfsyncr_defer) {
@@ -246,8 +252,5 @@ conf_pfsync(FILE *output, int s, char *ifname)
 			fprintf(output, " defer");
 		fprintf(output, "\n");
 	}
-	/* syncdev must be last */
-	if (preq.pfsyncr_syncdev[0] != '\0')
-		fprintf(output, " syncdev %s\n", preq.pfsyncr_syncdev);
 	return (0);
 }

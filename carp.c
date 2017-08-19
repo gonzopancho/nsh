@@ -92,12 +92,21 @@ intcarp(char *ifname, int ifs, int argc, char **argv)
 	switch(x->type) {
 	case CARP_ADVSKEW:
 	case CARP_ADVBASE:
+		if (set) {
+			errno = 0;
+			val = strtonum(argv[0], 0, 254, &errmsg);
+			if (errmsg) {
+				printf("%% %s value out of range: %s\n", x->name, errmsg);
+				return(0);
+			}
+		}
+		break;
 	case CARP_VHID:
 		if (set) {
 			errno = 0;
 			val = strtonum(argv[0], 0, 255, &errmsg);
 			if (errmsg) {
-				printf("%% %s value out of range: %s\n",  x->name, errmsg);
+				printf("%% %s value out of range: %s\n", x->name, errmsg);
 				return(0);
 			}
 		}
@@ -333,7 +342,7 @@ conf_carp(FILE *output, int s, char *ifname)
 	if (creq.carpr_carpdev[0] != '\0')
 		fprintf(output, " carpdev %s\n", creq.carpr_carpdev);
 	if (creq.carpr_key[0] != '\0')
-		fprintf(output, " cpass %s\n", creq.carpr_key);
+		fprintf(output, " carppass %s\n", creq.carpr_key);
 	if (creq.carpr_advbase != CARP_DFLTINTV)
 		fprintf(output, " advbase %i\n", creq.carpr_advbase);
 	if (creq.carpr_vhids[0] != 0)
