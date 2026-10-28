@@ -29,13 +29,9 @@
  * SUCH DAMAGE.
  */
 
-/* $KTH: genget.c,v 1.6 1997/05/04 09:01:34 assar Exp $ */
-
 #include <ctype.h>
 #include <stdio.h>
 #include "externs.h"
-
-#define	LOWER(x) (isupper((int)x) ? tolower((int)x) : (x))
 
 int isprefix(char *, char*);
 
@@ -52,17 +48,17 @@ isprefix(char *s1, char *s2)
     char c1, c2;
 
     if (*s1 == '\0')
-	return(-1);
+	return -1;
     os1 = s1;
     c1 = *s1;
     c2 = *s2;
-    while (LOWER(c1) == LOWER(c2)) {
+    while (tolower((unsigned char)c1) == tolower((unsigned char)c2)) {
 	if (c1 == '\0')
 	    break;
 	c1 = *++s1;
 	c2 = *++s2;
     }
-    return(*s1 ? 0 : (*s2 ? (s1 - os1) : (os1 - s1)));
+	return *s1 ? 0 : (*s2 ? (s1 - os1) : (os1 - s1));
 }
 
 static char *ambiguous;		/* special return value for command routines */
@@ -84,12 +80,12 @@ genget(char *name, char **table, int stlen)
 	if ((n = isprefix(name, *c)) == 0)
 	    continue;
 	if (n < 0)		/* exact match */
-	    return(c);
+		return c;
 	if (found)
-	    return(&ambiguous);
+		return &ambiguous;
 	found = c;
     }
-    return(found);
+	return found;
 }
 
 /*
@@ -98,5 +94,5 @@ genget(char *name, char **table, int stlen)
 int
 Ambiguous(void *s)
 {
-    return((char **)s == &ambiguous);
+	return (char **)s == &ambiguous;
 }

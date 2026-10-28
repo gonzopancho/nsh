@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2002-2008 Chris Cappuccio <chris@nmedia.net>
+ * Copyright (c) 2002-2013 Chris Cappuccio <chris@nmedia.net>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -22,23 +22,26 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <setjmp.h>
+#include <locale.h>
 #include <sys/socket.h>
 #include <sys/syslimits.h>
 #include <sys/ttycom.h>
 #include <sys/signal.h>
+#include <sys/stat.h>
 #include "editing.h"
 #include "stringlist.h"
 #include "externs.h"
+#include "ctl.h"
 
 void usage(void);
 
 jmp_buf toplevel;
 
-char *vers = "1.0";
+char *vers = NSH_VERSION_STR;
 int bridge = 0;		/* bridge mode for interface() */
 int verbose = 0;	/* verbose mode */
 int priv = 0, cli_rtable = 0;
-int editing;
+int editing = 0, interactive_mode = 0, config_mode = 0;;
 pid_t pid;
 
 History *histi = NULL;
@@ -46,25 +49,126 @@ History *histc = NULL;
 HistEvent ev;
 EditLine *elc = NULL;
 EditLine *eli = NULL;
+EditLine *elp = NULL;
 char *cursor_pos = NULL;
 
+struct hashtable *nsh_env;	/* per-user session environment variables */
+
 void intr(void);
+
+volatile sig_atomic_t caught_sigwinch;
+
+static void
+catchsigwinch(int signo)
+{
+	caught_sigwinch = signo;
+}
+
+static void
+load_userenv(void)
+{
+	char path[PATH_MAX];
+	FILE *f;
+	size_t linesize = 0;
+	ssize_t linelen;
+	char *home, *line = NULL;
+	int ret;
+	struct stat sb;
+
+	home = getenv("HOME");
+	if (home == NULL)
+		return;
+
+	if (nsh_env == NULL) {
+		nsh_env = hashtable_alloc();
+		if (nsh_env == NULL) {
+			printf("%% hashtable_alloc: %s", strerror(errno));
+			return;
+		}
+	}
+
+	ret = snprintf(path, sizeof(path), "%s/.nshenv", home);
+	if (ret < 0 || (size_t)ret >= sizeof(path))
+		return;
+
+	/* Fail silently if the file does not exist or is inaccessible. */
+	f = fopen(path, "r");
+	if (f == NULL)
+		return;
+	if (fstat(fileno(f), &sb) == -1)  {
+		fclose(f);
+		return;
+	}
+
+	/*
+	 * Fail silently if the file is owned by a different user.
+	 * In particular, we do not want to load a non-root user's
+	 * ~/.nshenv file while running as root.
+	 * Our environment may have been inherited from non-root to root
+	 * through exec, as doas(1) and su(1) may do.
+	 */
+	if (sb.st_uid != getuid()) {
+		fclose(f);
+		return;
+	}
+
+	while ((linelen = getline(&line, &linesize, f)) != -1) {
+		char *name, *eq, *value;
+
+		while (linelen > 0 && line[linelen - 1] == '\n') {
+			line[linelen - 1] = '\0';
+			linelen--;
+		}
+
+		name = strdup(line);
+		if (name == NULL) {
+			printf("%% %s: strdup: %s", __func__, strerror(errno));
+			break;
+		}
+
+		eq = strchr(name, '=');
+		if (eq == NULL) {
+			free(name);
+			continue;
+		}
+
+		*eq = '\0';
+		value = eq + 1;
+
+		if (setenv(name, value, 1) == -1) {
+			printf("%% setenv %s=%s: %s\n",
+			    name, value, strerror(errno));
+			free(name);
+			break;
+		}
+
+		if (hashtable_add(nsh_env, name, strlen(name),
+		    value, strlen(value))) {
+			printf("%% %s: hashtable_add(\"%s\", \"%s\") failed\n",
+			    __func__, name, value);
+			free(name);
+			break;
+		}
+	}
+
+	free(line);
+	fclose(f);
+}
 
 int
 main(int argc, char *argv[])
 {
-	int top, ch, iflag = 0;
+	int top, ch, cflag = 0;
 	char rc[PATH_MAX];
 
-	if(getuid() != 0) 
-		printf("%% Functionality may be limited without root privileges.\n");
+	setlocale(LC_CTYPE, "");
 
 	pid = getpid();
 
-	while ((ch = getopt(argc, argv, "i:v")) != -1)
+	while ((ch = getopt(argc, argv, "c:v")) != -1)
 		switch (ch) {
-		case 'i':
-			iflag = 1;
+		case 'c':
+			cflag = 1;
 			strlcpy(rc, optarg, PATH_MAX);
 			break;
 		case 'v':
@@ -74,63 +178,38 @@ main(int argc, char *argv[])
 			usage();
 		}
 
+
 	argc -= optind;
 	argv += optind;
-
-	/* create temporal tables (if they aren't already there) */
-	if (db_create_table_rtables() < 0)
-		printf("%% database rtables creation failed\n");
-	if (db_create_table_flag_x("ctl") < 0)
-		printf("%% database ctl creation failed\n");
-	if (db_create_table_flag_x("dhcrelay") < 0)
-		printf("%% database dhcrelay creation failed\n");
-	if (db_create_table_flag_x("ipv6linklocal") < 0)
-		printf("%% database ipv6linklocal creation failed\n");
-	if (db_create_table_flag_x("lladdr") < 0)
-		printf("%% database lladdr creation failed\n");
-
-	printf("%% NSH v%s\n", vers);
-
 	if (argc > 0)
 		usage();
 
-	if (iflag) {
-		/*
-		 * Interpret config file and exit
-		 */
-		char *argv_demote[] = { "group", "carp", "carpdemote", "128" };
-		char *argv_restore[] = { "no", "group", "carp", "carpdemote", "128" };
-		char tmpfile[64];
+	interactive_mode = !cflag && isatty(STDIN_FILENO);
+	if (interactive_mode) {
+		editing = 1;
 
-		struct daemons *daemons;
-
-		for (daemons = ctl_daemons; daemons->name != 0; daemons++)
-			if (daemons->tmpfile) {
-				snprintf(tmpfile, sizeof(tmpfile), "%s.0",
-				    daemons->tmpfile);
-				rmtemp(tmpfile);
-			}
-
-		priv = 1;
-
-		/*
-		 * Set carp group carpdemote to 128 during initialization
-		 */
-		group(sizeof(argv_demote) / sizeof(argv_demote[0]), argv_demote);
-
-		cmdrc(rc);
-
-		/*
-		 * Initialization over
-		 */
-		group(sizeof(argv_restore) / sizeof(argv_restore[0]), argv_restore);
-
-		exit(0);
+		if (strstr(vers, "-current") != NULL)
+			printf("%% NSH v%s; Compiled by %s@%s on %s\n",
+			    vers, compiledby, compilehost, compiled);
+		else
+			printf("%% NSH v%s\n", vers);
 	}
+
+	cli_rtable = getrtable();
+
+	if (cflag) {
+		/* the file's configuration, which nshd loads and commits */
+		setwinsize(0);
+		exit(nshd_load(rc) == 0 ? 0 : 1);
+	}
+
+	load_userenv();
+	/* nshd's session, which is what privileged means, if nshd lets us */
+	nshd_priv(1);
 
 	top = setjmp(toplevel) == 0;
 	if (top) {
-		(void)signal(SIGWINCH, setwinsize);
+		(void)signal(SIGWINCH, catchsigwinch);
 		(void)signal(SIGINT, (sig_t)intr);
 		(void)setwinsize(0);
 	} else
@@ -148,9 +227,9 @@ main(int argc, char *argv[])
 void
 usage(void)
 {
-	(void)fprintf(stderr, "usage: %s [-v] [-i rcfile]\n", __progname);
-	(void)fprintf(stderr, "           -v indicates verbose operation\n");
-	(void)fprintf(stderr, "           -i rcfile loads configuration from rcfile\n");
+	fprintf(stderr, "usage: %s [-v] [-c rcfile]\n", getprogname());
+	fprintf(stderr, "           -v indicates verbose operation\n");
+	fprintf(stderr, "           -c rcfile loads commands from rcfile\n");
 	exit(1);
 }
 

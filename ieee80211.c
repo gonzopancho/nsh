@@ -64,15 +64,26 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <stdarg.h>
 #include <sys/limits.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
+#include <sys/param.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <netinet/if_ether.h>
 #include <net80211/ieee80211.h>
 #include <net80211/ieee80211_ioctl.h>
+#include "stringlist.h"
 #include "externs.h"
+#include "settings.h"
+#include "kernel.h"
+#include "kfacts.h"
+
+static int cand_80211(char *, char *);
+static void nwkey_str(char *, size_t, char *);
+static int cand_nwkey(char *, struct ieee80211_nwkey *, char *);
+static int cand_txpower(char *, int);
 
 const char *
 get_string(const char *val, const char *sep, u_int8_t *buf, int *lenp)
@@ -83,7 +94,7 @@ get_string(const char *val, const char *sep, u_int8_t *buf, int *lenp)
 
 	len = *lenp;
 	p = buf;
-	hexstr = (val[0] == '0' && tolower((u_char) val[1]) == 'x');
+	hexstr = (val[0] == '0' && tolower((unsigned char)val[1]) == 'x');
 	if (hexstr)
 		val += 2;
 	for (;;) {
@@ -94,13 +105,13 @@ get_string(const char *val, const char *sep, u_int8_t *buf, int *lenp)
 			break;
 		}
 		if (hexstr) {
-			if (!isxdigit((u_char) val[0]) ||
-			    !isxdigit((u_char) val[1])) {
+			if (!isxdigit((unsigned char)val[0]) ||
+			    !isxdigit((unsigned char)val[1])) {
 				printf("%% get_string: bad hexadecimal digits\n");
 				return NULL;
 			}
 		}
-		if (p > buf + len) {
+		if (p >= buf + len) {
 			if (hexstr)
 				printf("%% get_string: hexadecimal digits too long\n");
 			else
@@ -108,9 +119,9 @@ get_string(const char *val, const char *sep, u_int8_t *buf, int *lenp)
 			return NULL;
 		}
 		if (hexstr) {
-#define tohex(x)        (isdigit(x) ? (x) - '0' : tolower(x) - 'a' + 10)
-			*p++ = (tohex((u_char) val[0]) << 4) |
-				tohex((u_char) val[1]);
+#define tohex(x)        (isdigit((unsigned char)(x)) ? (x) - '0' : \
+			    tolower((unsigned char)(x)) - 'a' + 10)
+			*p++ = (tohex(val[0]) << 4) | tohex(val[1]);
 #undef tohex
 			val += 2;
 		} else {
@@ -138,12 +149,14 @@ make_string(char *str, int str_len, const u_int8_t *buf, int buf_len)
 	str_len--;
 	i = 0;
 	hasspc = 0;
-	if (buf_len < 2 || buf[0] != '0' || tolower(buf[1]) != 'x') {
+	if (buf_len < 2 || buf[0] != '0' ||
+	    tolower((unsigned char)buf[1]) != 'x') {
 		for (; i < buf_len; i++) {
 			/* Only print 7-bit ASCII keys */
-			if (buf[i] & 0x80 || !isprint(buf[i]))
+			if (buf[i] & 0x80 ||
+			    !isprint((unsigned char)buf[i]))
 				break;
-			if (isspace(buf[i]))
+			if (isspace((unsigned char)buf[i]))
 				hasspc++;
 		}
 	}
@@ -163,12 +176,20 @@ make_string(char *str, int str_len, const u_int8_t *buf, int buf_len)
 
 /* was setifnwkey() */
 int
-intnwkey(char *ifname, int ifs, int argc, char **argv)
+intnwkey(int argc, char **argv, ...)
 {
 	int i, len, set;
-	char *cp = NULL, *val = NULL;
+	char *val = NULL;
 	struct ieee80211_nwkey nwkey;
 	u_int8_t keybuf[IEEE80211_WEP_NKID][16];
+	va_list ap;
+	char *ifname;
+	int ifs;
+
+	va_start(ap, argv);
+	ifname = va_arg(ap, char *);
+	ifs = va_arg(ap, int);
+	va_end(ap);
 
 	if (NO_ARG(argv[0])) {
 		set = 0;
@@ -179,13 +200,13 @@ intnwkey(char *ifname, int ifs, int argc, char **argv)
 	argc--;
 	argv++;
 
-	if((!set && argc != 0) || (set && argc != 1)) {
+	if((!set && argc > 1) || (set && argc != 1)) {
 		printf("%% nwkey <key>\n");
 		printf("%% nwkey persist\n");
 		printf("%% nwkey persist:<key>\n");
 		printf("%% nwkey <n>:<k1>,<k2>,<k3>,<k4>\n");
-		printf("%% no nwkey\n");
-		return(0);
+		printf("%% no nwkey [key]\n");
+		return -1;
 	}
 	if(set)
 		val = argv[0];
@@ -209,7 +230,7 @@ intnwkey(char *ifname, int ifs, int argc, char **argv)
 		goto set_nwkey;
 	} else {
 set_nwkey:
-		if (isdigit(val[0]) && val[1] == ':') {
+		if (isdigit((unsigned char)val[0]) && val[1] == ':') {
 			/* specifying a full set of four keys */
 			nwkey.i_defkid = val[0] - '0';
 			val += 2;
@@ -217,19 +238,19 @@ set_nwkey:
 				len = sizeof(keybuf[i]);
 				val = (char *)get_string(val, ",", keybuf[i], &len);
 				if (val == NULL)
-					return(0);
+					return -1;
 				nwkey.i_key[i].i_keylen = len;
 				nwkey.i_key[i].i_keydat = keybuf[i];
 			}
-			if (cp != NULL) {
+			if (*val != '\0') {
 				printf("%% intnwkey: too many keys\n");
-				return(0);
+				return -1;
 			}
 		} else {
 			len = sizeof(keybuf[i]);
 			val = (char *)get_string(val, NULL, keybuf[0], &len);
 			if (val == NULL)
-				return(0);
+				return -1;
 			nwkey.i_key[0].i_keylen = len;
 			nwkey.i_key[0].i_keydat = keybuf[0];
 			i = 1;
@@ -240,10 +261,18 @@ set_nwkey:
 		nwkey.i_key[i].i_keylen = 0;
 		nwkey.i_key[i].i_keydat = NULL;
 	}
+	if (candidate)
+		return cand_nwkey(ifname, &nwkey, set ? argv[0] : NULL);
 	(void) strlcpy(nwkey.i_name, ifname, sizeof(nwkey.i_name));
-	if (ioctl(ifs, SIOCS80211NWKEY, (caddr_t)&nwkey) == -1)
+	if (ioctl(ifs, SIOCS80211NWKEY, (caddr_t)&nwkey) == -1) {
 		printf("%% intnwkey: SIOCS80211NWKEY: %s\n", strerror(errno));
-	return(0);
+		return -1;
+	}
+	/* the kernel shows no key, so get_nwinfo() prints the one kept here */
+	db_delete_flag_x_ctl("nwkey", ifname, 0);
+	if (set)
+		db_insert_flag_x("nwkey", ifname, 0, DB_X_ENABLE, argv[0]);
+	return 0;
 }
 
 /*
@@ -252,8 +281,7 @@ set_nwkey:
 int
 get_nwinfo(char *ifname, char *str, int str_len, int type)
 {
-	char tmp[128];
-	int ifs, len, i, nwkey_verbose;
+	int ifs, len;
 
 	ifs = socket(AF_INET, SOCK_DGRAM, 0);
 	if (ifs < 0) {
@@ -309,11 +337,8 @@ get_nwinfo(char *ifname, char *str, int str_len, int type)
 		strlcpy(power.i_name, ifname, sizeof(power.i_name));
 
 		if (ioctl(ifs, SIOCG80211POWER, &power) == 0) {
-			if (power.i_enabled &&
-			    power.i_maxsleep != DEFAULT_POWERSAVE)
+			if (power.i_enabled)
 				snprintf(str, str_len, "%d", power.i_maxsleep);
-			else if (power.i_enabled)
-				memset(&str, '\0', str_len); /* "powersave " */
 		} else {
 			printf("%% get_nwinfo: SIOCG80211POWER: %s\n",
 			    strerror(errno));
@@ -345,90 +370,40 @@ get_nwinfo(char *ifname, char *str, int str_len, int type)
 	case NWKEY:
 	{
 		struct ieee80211_nwkey nwkey;
-		u_int8_t keybuf[IEEE80211_WEP_NKID][16];
+		StringList *key;
 
 		memset(&nwkey, 0, sizeof(nwkey));
 		(void) strlcpy(nwkey.i_name, ifname, sizeof(nwkey.i_name));
 		if (ioctl(ifs, SIOCG80211NWKEY, (caddr_t) & nwkey) == 0 &&
 		    nwkey.i_wepon > 0) {
-			/* try to retrieve WEP keys */
-			for (i = 0; i < IEEE80211_WEP_NKID; i++) {
-				nwkey.i_key[i].i_keydat = keybuf[i];
-				nwkey.i_key[i].i_keylen = sizeof(keybuf[i]);
-			}
-			if (ioctl(ifs, SIOCG80211NWKEY, (caddr_t) & nwkey)
-			    == -1) {
-				strlcat(str, "*****", str_len);
-			} else {
-				nwkey_verbose = 0;
-				/*
-				 * check to see non default key or multiple keys
-				 * defined
-				 */
-				if (nwkey.i_defkid != 1) {
-					nwkey_verbose = 1;
-				} else {
-					for (i = 1; i < IEEE80211_WEP_NKID; i++)
-					{
-						if (nwkey.i_key[i].i_keylen !=
-						    0) {
-							nwkey_verbose = 1;
-							break;
-						}
-					}
-				}
-				/* check extra ambiguity with keywords */
-				if (!nwkey_verbose) {
-					if (nwkey.i_key[0].i_keylen >= 2 &&
-					    isdigit(nwkey.i_key[0].i_keydat[0])
-					    && nwkey.i_key[0].i_keydat[1] ==
-					    ':')
-						nwkey_verbose = 1;
-					else if (nwkey.i_key[0].i_keylen >= 7 &&
-						    MIN_ARG(
-						    nwkey.i_key[0].i_keydat,
-						    "persist"))
-						nwkey_verbose = 1;
-				}
-				if (nwkey_verbose) {
-					snprintf(tmp, sizeof(tmp), "%d:",
-					    nwkey.i_defkid);
-					strlcat(str, tmp, str_len);
-				}
-				for (i = 0; i < IEEE80211_WEP_NKID; i++) {
-					if (i > 0)
-						strlcat(str, ",", str_len);
-					if (nwkey.i_key[i].i_keylen < 0) {
-						strlcat(str, "persist",
-						    str_len);
-					} else {
-						/*
-						 * XXX - sanity check
-						 * nwkey.i_key[i].i_keylen
-						 */
-						make_string(str, str_len,
-						    nwkey.i_key[i].i_keydat,
-						    nwkey.i_key[i].i_keylen);
-					}
-					if (!nwkey_verbose)
-						break;
-				}
-			}
+			key = sl_init();
+			if (db_select_flag_x_ctl(key, "nwkey", ifname) >= 0 &&
+			    key->sl_cur > 0)
+				nwkey_str(str, str_len, key->sl_str[0]);
+			sl_free(key, 1);
 		}
 	}
 	break;
 	} /* switch {} */
 
 	close(ifs);
-	return(strlen(str));
+	return strlen(str);
 }
 
 int
-inttxpower(char *ifname, int ifs, int argc, char **argv)
+inttxpower(int argc, char **argv, ...)
 {
 	const char *errmsg = NULL;
 	struct ieee80211_txpower txpower;
 	short dbm, set;
+	va_list ap;
+	char *ifname;
+	int ifs;
+
+	va_start(ap, argv);
+	ifname = va_arg(ap, char *);
+	ifs = va_arg(ap, int);
+	va_end(ap);
 
 	if (NO_ARG(argv[0])) {
 		set = 0;
@@ -443,7 +418,7 @@ inttxpower(char *ifname, int ifs, int argc, char **argv)
 	if ((set && argc != 1) || (!set && argc > 1)) {
 		printf("%% txpower <dBm>\n");
 		printf("%% no txpower     (auto-select)\n");
-		return(0);
+		return -1;
 	}
 
 	strlcpy(txpower.i_name, ifname, sizeof(txpower.i_name));
@@ -456,25 +431,38 @@ inttxpower(char *ifname, int ifs, int argc, char **argv)
 		if (errmsg) {
 			printf("%% inttxpower: txpower %sdBm: %s\n", argv[0],
 			    errmsg);
-			return(0);
+			return -1;
 		}
 		txpower.i_val = (int16_t)dbm;
 		txpower.i_mode = IEEE80211_TXPOWER_MODE_FIXED;
 	}
 
-	if (ioctl(ifs, SIOCS80211TXPOWER, (caddr_t)&txpower) == -1)
+	if (candidate)
+		return cand_txpower(ifname, txpower.i_val);
+
+	if (ioctl(ifs, SIOCS80211TXPOWER, (caddr_t)&txpower) == -1) {
 		printf("%% inttxpower: SIOCS80211TXPOWER failed: %s\n",
 		    strerror(errno));
+		return -1;
+	}
 
-	return(0);
+	return 0;
 }
 
 int
-intbssid(char *ifname, int ifs, int argc, char **argv)
+intbssid(int argc, char **argv, ...)
 {
 	struct ieee80211_bssid bssid;
 	struct ether_addr *ea;
 	short set;
+	va_list ap;
+	char *ifname;
+	int ifs;
+
+	va_start(ap, argv);
+	ifname = va_arg(ap, char *);
+	ifs = va_arg(ap, int);
+	va_end(ap);
 
 	if (NO_ARG(argv[0])) {
 		set = 0;
@@ -489,14 +477,14 @@ intbssid(char *ifname, int ifs, int argc, char **argv)
 	if ((set && argc != 1) || (!set && argc > 1)) {
 		printf("%% bssid <xx:xx:xx:xx:xx:xx>\n");
 		printf("%% no bssid       (auto-select)\n");
-		return(0);
+		return -1;
 	}
 
 	if (set) {
-		ea = ether_aton(argv[1]);
+		ea = ether_aton(argv[0]);
 		if (ea == NULL) {
 			printf("%% Invalid bssid\n");
-			return(0);
+			return -1;
 		}
 		memcpy(&bssid.i_bssid, ea->ether_addr_octet,
 		    sizeof(bssid.i_bssid));
@@ -505,9 +493,96 @@ intbssid(char *ifname, int ifs, int argc, char **argv)
 
 	strlcpy(bssid.i_name, ifname, sizeof(bssid.i_name));
 	if (ioctl(ifs, SIOCS80211BSSID, &bssid) == -1) {
-		printf("%% inttxpower: SIOCS80211BSSID failed: %s\n",
+		printf("%% intbssid: SIOCS80211BSSID failed: %s\n",
 		    strerror(errno));
+		return -1;
 	}
 
 	return (0);
+}
+
+/*
+ * Is name an 802.11 interface, in configure private? It is if
+ * SIOCG80211NWID answers, as conf_ifmetrics() asks; if not, the
+ * handler's error is what says so.
+ */
+static int
+cand_80211(char *name, char *what)
+{
+	if (kf_wifi(name))
+		return 1;
+	printf("%% %s: %s\n", what, strerror(ENOTTY));
+	return 0;
+}
+
+/* A WEP key as intnwkey() kept it, quoted as makeargv() reads it back */
+static void
+nwkey_str(char *buf, size_t len, char *key)
+{
+	if (strpbrk(key, " \t") != NULL)
+		snprintf(buf, len, "\"%s\"", key);
+	else
+		strlcpy(buf, key, len);
+}
+
+/*
+ * nwid in configure private. SIOCS80211NWID turns WEP off, so the nwkey
+ * line goes too.
+ */
+int
+cand_nwid(char *ifname, u_int8_t *nwid, int len)
+{
+	char str[IEEE80211_NWID_LEN * 2 + 8];
+
+	if (!cand_80211(ifname, "intnwid: SIOCS80211NWID"))
+		return -1;
+	make_string(str, sizeof(str), nwid, len);
+	if (cand_setting(ST_ON, "nwid %s", str) == -1)
+		return -1;
+	return cand_setting(ST_DEFAULT, "nwkey");
+}
+
+/* nwkey in configure private, as ieee80211_ioctl_setnwkeys() takes it */
+static int
+cand_nwkey(char *ifname, struct ieee80211_nwkey *nwkey, char *key)
+{
+	char str[256];
+
+	if (!cand_80211(ifname, "intnwkey: SIOCS80211NWKEY"))
+		return -1;
+	if (nwkey->i_wepon == IEEE80211_NWKEY_OPEN)
+		return cand_setting(ST_DEFAULT, "nwkey");
+	if (nwkey->i_defkid < 1 || nwkey->i_defkid > IEEE80211_WEP_NKID) {
+		printf("%% intnwkey: SIOCS80211NWKEY: %s\n", strerror(EINVAL));
+		return -1;
+	}
+	nwkey_str(str, sizeof(str), key);
+	return cand_setting(ST_ON, "nwkey %s", str);
+}
+
+/* txpower in configure private: conf prints none for the most */
+static int
+cand_txpower(char *ifname, int dbm)
+{
+	if (!cand_80211(ifname, "inttxpower: SIOCS80211TXPOWER failed"))
+		return -1;
+	if (dbm < kern_txpower_min || dbm > kern_txpower_max) {
+		printf("%% inttxpower: SIOCS80211TXPOWER failed: %s\n",
+		    strerror(EINVAL));
+		return -1;
+	}
+	if (dbm == kern_txpower_max)
+		return cand_setting(ST_DEFAULT, "txpower");
+	return cand_setting(ST_ON, "txpower %d", dbm);
+}
+
+/* powersave in configure private */
+int
+cand_powersave(char *ifname, int set, int maxsleep)
+{
+	if (!cand_80211(ifname, "intpowersave: SIOCG80211POWER"))
+		return -1;
+	if (!set)
+		return cand_setting(ST_DEFAULT, "powersave");
+	return cand_setting(ST_ON, "powersave %d", maxsleep);
 }

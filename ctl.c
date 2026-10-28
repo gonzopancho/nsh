@@ -20,542 +20,1574 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <ctype.h>
+#include <libgen.h>
+#include <histedit.h>
+#include <stdarg.h>
 #include <sys/signal.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
+#include <sys/syslimits.h>
+#include <sys/sysctl.h>
+#include <net/if.h>
 #include "externs.h"
+#include "facts.h"
+#include "showfacts.h"
+#include "editing.h"
+#include "ctl.h"
+#include "stringlist.h"
+#include "settings.h"
+#include "session.h"
+#include "conftree.h"
 
-/* service daemons */
-#define OSPFD		"/usr/sbin/ospfd"
-#define OSPF6D		"/usr/sbin/ospf6d"
-#define BGPD		"/usr/sbin/bgpd"
-#define RIPD		"/usr/sbin/ripd"
-#define ISAKMPD		"/sbin/isakmpd"
-#define IKED		"/sbin/iked"
-#define DVMRPD		"/usr/sbin/dvmrpd"
-#define RTADVD		"/usr/sbin/rtadvd"
-#define RELAYD		"/usr/sbin/relayd"
-#define DHCPD		"/usr/sbin/dhcpd"
-#define SASYNCD		"/usr/sbin/sasyncd"
-#define	SNMPD		"/usr/sbin/snmpd"
-#define NTPD		"/usr/sbin/ntpd"
-#define FTPPROXY	"/usr/sbin/ftp-proxy"
-#define TFTPPROXY	"/usr/sbin/tftp-proxy"
-#define TFTPD		"/usr/sbin/tftpd"
-#define INETD		"/usr/sbin/inetd"
-#define SSHD		"/usr/sbin/sshd"
-#define LDPD		"/usr/sbin/ldpd"
-#define SMTPD		"/usr/sbin/smtpd"
-#define LDAPD		"/usr/sbin/ldapd"
-#define IFSTATED	"/usr/sbin/ifstated"
-#define NPPPD		"/usr/sbin/npppd"
-#define NPPPCTL		"/usr/sbin/npppctl"
-#ifndef DHCPLEASES
-#define DHCPLEASES	"/var/db/dhcpd.leases"
-#endif
-
-void call_editor(char *, char **, char *);
-void ctl_symlink(char *, char **, char *);
-int rule_writeline(char *, mode_t, char *);
-void fill_tmpfile(char **, char *, int, char *, int);
-int acq_lock(char *);
-void rls_lock(int);
+/* table variable (for pkill usage) */
 static char table[16];
 
-char *ctl_pf_test[] = { PFCTL, "-nf", REQTEMP, '\0' };
-struct ctl ctl_pf[] = {
-	{ "enable",	"enable service",
-	    { PFCTL, "-e", NULL }, NULL, DB_X_ENABLE },
-	{ "disable",	"disable service",
-	    { PFCTL, "-d", NULL }, NULL, DB_X_DISABLE },
-	{ "edit",	"edit configuration",
-	    { "pf", (char *)ctl_pf_test, NULL }, call_editor, 0 },
-	{ "reload",	"reload service",
-	    { PFCTL, "-f", REQTEMP, NULL }, NULL, 0 },
-	{ 0, 0, { 0 }, 0, 0 }
+/* service routines, used as handlers in struct ctl */
+int edit_crontab(int, char **, ...);
+int install_crontab(int, char **, ...);
+int edit_motd(int, char **, ...);
+int call_editor(int, char **, ...);
+int start_dhcpd(int, char **, ...);
+int restart_dhcpd(int, char **, ...);
+
+/* subroutines */
+int fill_tmpfile(char **, char *, char **);
+int edit_file(char *, mode_t, char *, char **);
+int acq_lock(char *);
+void rls_lock(int);
+static int ctl_exec(char *, char **);
+static int ctl_cand(struct daemons *, struct ctl *, char **);
+static int ctl_cand_takes(struct ctl *);
+static int ctl_isedit(struct ctl *);
+static int ctl_run(struct daemons *, struct ctl *, char **, char *);
+static struct ctl *ctl_actrow(struct daemons *, int);
+static int ctl_cand_edit(struct daemons *, char *, char **);
+static int ctl_cand_test(struct daemons *, char *, char **);
+static int ctl_cand_stage(struct daemons *, char *, char *, char *,
+    size_t);
+static void ctl_cand_unstage(char *, char *);
+static int ctl_cand_follow(struct daemons *, char *, int);
+static int admin_scan(struct daemons *, const char *, size_t, char **);
+static int admin_had(struct daemons *, int, char *);
+static const char *admin_in(int);
+
+/*
+ * While a commit runs (admin_begin()): whether its session lacks the
+ * admin permission, what ran before it, and whether a line was refused
+ */
+static int admin_limited;
+static struct cnode *admin_tree;
+static int admin_refused;
+
+/*
+ * The daemons whose rules need admin to change at all: root's crontab,
+ * inetd's and ifstated's, which run commands as root, and sshd's,
+ * which decides who logs in as root
+ */
+#define ADMIN_WHOLE(d)	((d)->table == ctl_crontab || \
+			    (d)->table == ctl_inet || \
+			    (d)->table == ctl_ifstate || (d)->table == ctl_sshd)
+
+/*
+ * The words that make a line of a daemon's rules need admin, in any
+ * case: the daemon's, or with NULL any daemon's. Each runs a command as
+ * root, or reads a file it names
+ */
+static const struct {
+	struct ctl	*table;
+	const char	*word;
+} admin_words[] = {
+	{ ctl_smtp,	"mda" },	/* runs a command */
+	{ ctl_smtp,	"proc" },	/* proc, proc-exec */
+	{ ctl_smtp,	"|" },		/* mail to a command */
+	{ ctl_smtp,	"table" },	/* aliases, so a | */
+	{ ctl_smtp,	"$" },		/* a macro, which can */
+	{ ctl_smtp,	"=" },		/* hide any of them */
+	{ ctl_snmp,	"handle" },	/* runs a command */
+	{ ctl_snmp,	"$" },
+	{ ctl_snmp,	"=" },
+	{ ctl_pf,	"file" },	/* a table's file */
+	{ ctl_pf,	"load" },	/* an anchor's file */
+	{ NULL,		"include" },	/* rules from a file */
 };
 
-char *ctl_ospf_test[] = { OSPFD, "-nf", REQTEMP, '\0' };
-struct ctl ctl_ospf[] = {
-	{ "enable",     "enable service",
-	    { OSPFD, "-f", REQTEMP, NULL }, NULL, DB_X_ENABLE },
-	{ "disable",    "disable service",
-	    { PKILL, table, "ospfd", NULL }, NULL, DB_X_DISABLE },
-	{ "edit",       "edit configuration",
-	    { "ospf", (char *)ctl_ospf_test, NULL }, call_editor, 0 },
-	{ "reload",     "reload service",
-	    { OSPFCTL, "reload", NULL }, NULL, 0 },
-	{ "fib",        "fib couple/decouple",
-	    { OSPFCTL, "fib", REQ, NULL }, NULL, 0 },
-	{ "log",	"log brief/verbose",
-	    { OSPFCTL, "log", REQ, NULL }, NULL, 0 },
-	{ 0, 0, { 0 }, 0, 0 }
-};
-
-char *ctl_ospf6_test[] = { OSPF6D, "-nf", REQTEMP, '\0' };
-struct ctl ctl_ospf6[] = {
-	{ "enable",     "enable service",
-	    { OSPF6D, "-f", REQTEMP, NULL }, NULL, DB_X_ENABLE },
-	{ "disable",    "disable service",
-	    { PKILL, table, "ospf6d", NULL }, NULL, DB_X_DISABLE },
-	{ "edit",       "edit configuration",
-	    { "ospf6", (char *)ctl_ospf6_test, NULL }, call_editor, 0 },
-	{ "reload",     "reload service",
-	    { OSPF6CTL, "reload", NULL }, NULL, 0 },
-	{ "fib",        "fib couple/decouple",
-	    { OSPF6CTL, "fib", REQ, NULL }, NULL, 0 },
-	{ "log",	"log brief/verbose",
-	    { OSPF6CTL, "log", REQ, NULL }, NULL, 0 },
-	{ 0, 0, { 0 }, 0, 0 }
-};
-
-char *ctl_bgp_test[] = { BGPD, "-nf", REQTEMP, NULL, '\0' };
-struct ctl ctl_bgp[] = {
-	{ "enable",     "enable service",
-	    { BGPD, "-f", REQTEMP, NULL }, NULL, DB_X_ENABLE },
-	{ "disable",    "disable service",
-	    { PKILL, table, "bgpd", NULL }, NULL, DB_X_DISABLE },
-	{ "edit",       "edit configuration",
-	    { "bgp", (char *)ctl_bgp_test, NULL }, call_editor, 0 },
-	{ "reload",     "reload service",
-	    { BGPCTL, "reload", NULL }, NULL, 0 },
-	{ "fib",	"fib couple/decouple",
-	    { BGPCTL, "fib", REQ, NULL }, NULL, 0 },
-	{ "irrfilter",	"generate bgpd filters",
-	    { BGPCTL, "irrfilter", REQ, OPT, NULL }, NULL, 0 },
-	{ "neighbor",	"neighbor up/down/clear/refresh",
-	    { BGPCTL, "neighbor", OPT, OPT, NULL }, NULL, 0 },
-	{ "network",	"network add/delete/flush/show",
-	    { BGPCTL, "network", REQ, OPT, NULL }, NULL, 0 },
-        { 0, 0, { 0 }, 0, 0 }
-};
-
-char *ctl_rip_test[] = { RIPD, "-nf", REQTEMP, '\0' };
-struct ctl ctl_rip[] = {
-	{ "enable",     "enable service",
-	    { RIPD, "-f", REQTEMP, NULL }, NULL, DB_X_ENABLE },
-	{ "disable",    "disable service",
-	    { PKILL, table, "ripd", NULL }, NULL, DB_X_DISABLE },
-	{ "edit",       "edit configuration",
-	    { "rip", (char *)ctl_rip_test, NULL }, call_editor, 0 },
-	{ "reload",	"reload service",
-	    { RIPCTL, "reload", NULL }, NULL, 0 },
-	{ "fib",        "fib couple/decouple",
-	    { RIPCTL, "fib", REQ, NULL }, NULL, 0 },
-	{ 0, 0, { 0 }, 0, 0 }
-};
-
-char *ctl_ldp_test[] = { LDPD, "-nf", REQTEMP, '\0' };
-struct ctl ctl_ldp[] = {
-	{ "enable",	"enable service",
-	   { LDPD, "-f", REQTEMP, NULL }, NULL, DB_X_ENABLE },
-	{ "disable",	"disable service",
-	   { PKILL, table, "ldpd", NULL }, NULL, DB_X_DISABLE },
-	{ "edit",	"edit configuration",
-	   { "ldp", (char *)ctl_ldp_test, NULL }, call_editor, 0 },
-	{ "fib",	"fib couple/decouple",
-	   { LDPCTL, "fib", REQ, NULL }, NULL, 0 },
-	{ 0, 0, { 0 }, 0, 0 }
-};
-
-char *ctl_ipsec_test[] = { IPSECCTL, "-nf", REQTEMP, '\0' };
-struct ctl ctl_ipsec[] = {
-	{ "enable",     "enable service",
-	    { ISAKMPD, "-Sa", NULL }, NULL, DB_X_ENABLE },
-	{ "disable",    "disable service",                   
-	    { PKILL, table, "isakmpd", NULL }, NULL, DB_X_DISABLE },
-	{ "edit",       "edit configuration",   
-	    { "ipsec", (char *)ctl_ipsec_test, NULL }, call_editor, 0 },
-	{ "reload",     "reload service",
-	    { IPSECCTL, "-f", REQTEMP, NULL }, NULL, 0 },
-	{ 0, 0, { 0 }, 0, 0 }
-};
-
-char *ctl_ike_test[] = { IKED, "-nf", REQTEMP, '\0' };
-struct ctl ctl_ike[] = {
-	{ "enable",	"enable service",
-	    { IKED, "-f", REQTEMP, NULL }, NULL, DB_X_ENABLE },
-	{ "disable",	"disable service",
-	    { PKILL, table, "iked", NULL }, NULL, DB_X_DISABLE },
-	{ "active",	"force IKE active mode",
-	    { IKECTL, "active", NULL }, NULL, 0 },
-	{ "passive",	"force IKE passive mode",
-	    { IKECTL, "passive", NULL }, NULL, 0 },
-	{ "couple",	"load SAs and flows into kernel",
-	    { IKECTL, "couple", NULL }, NULL, 0 },
-	{ "decouple",	"unload SAs and flows from kernel",
-	    { IKECTL, "decouple", NULL }, NULL, 0 },
-	{ "edit",	"edit configuration",
-	    { "ike", (char *)ctl_ike_test, NULL }, call_editor, 0 },
-	{ "reload",	"reload service",
-	    { IKECTL, "reload", NULL }, NULL, 0 },
-	{ "reset",	"reset state, policies, SAs or user database",
-	    { IKECTL, "reset", REQ, NULL }, NULL, 0 },
-	{ 0, 0, { 0 }, 0, 0 }
-};
-
-char *ctl_dvmrp_test[] = { DVMRPD, "-nf", REQTEMP, '\0' };
-struct ctl ctl_dvmrp[] = {
-	{ "enable",     "enable service",
-	    { DVMRPD, "-f", REQTEMP, NULL }, NULL, DB_X_ENABLE },
-	{ "disable",    "disable service",   
-	    { PKILL, table, "dvmrpd", NULL }, NULL, DB_X_DISABLE },
-	{ "edit",       "edit configuration",
-	    { "dvmrp", (char *)ctl_dvmrp_test,  NULL }, call_editor, 0 },
-	{ 0, 0, { 0 }, 0, 0 }
-};
-
-struct ctl ctl_rtadv[] = {
-	{ "enable",	"enable service",
-	    { RTADVD, "-c", REQTEMP, REQ, OPT, OPT, OPT, NULL }, NULL, DB_X_ENABLE },
-	{ "disable",	"disable service",
-	    { PKILL, table, "rtadvd", NULL }, NULL, DB_X_DISABLE },
-	{ "edit",	"edit configuration",
-	    { "rtadv", NULL, NULL}, call_editor, 0 },
-	{ 0, 0, { 0 }, 0, 0 }
-};
-
-char *ctl_ifstate_test[] = { IFSTATED, "-nf", REQTEMP, '\0' };
-struct ctl ctl_ifstate[] = {
-	{ "enable",     "enable service",
-	    { IFSTATED, "-f", REQTEMP, NULL }, NULL, DB_X_ENABLE },
-	{ "disable",    "disable service",
-	    { PKILL, table, "ifstated", NULL }, NULL, DB_X_DISABLE },
-	{ "edit",       "edit configuration",
-	    { "ifstate", (char *)ctl_ifstate_test,  NULL }, call_editor, 0 },
-	{ 0, 0, { 0 }, 0, 0 }
-};
-
-struct ctl ctl_sasync[] = {
-	{ "enable",     "enable service",
-	    { SASYNCD, "-c", REQTEMP, NULL }, NULL, DB_X_ENABLE },
-	{ "disable",    "disable service",
-	    { PKILL, table, "sasyncd", NULL }, NULL, DB_X_DISABLE },
-	{ "edit",       "edit configuration",
-	    { "sasync", NULL, NULL }, call_editor, 0 },
-	{ 0, 0, { 0 }, 0, 0 }
-};
-
-char *ctl_nppp_test[] = { NPPPD, "-nf", REQTEMP, '\0' };
-struct ctl ctl_nppp[] = {
-	{ "enable",	"enable service",
-	    { NPPPD, "-f", REQTEMP, NULL }, NULL, DB_X_ENABLE },
-	{ "disable",	"disable service",
-	    { PKILL, table, "npppd", NULL }, NULL, DB_X_DISABLE },
-	{ "clear",	"disconnect PPP sessions",
-	    { NPPPCTL, "clear", REQ, OPT, OPT, NULL }, NULL, 0 },
-	{ "session", 	"show PPP sessions",
-	    { NPPPCTL, "session", REQ, OPT, OPT, NULL }, NULL, 0 },
-	{ "edit",	"edit configuration",
-	    { "nppp", (char *)ctl_nppp_test, NULL }, call_editor, 0 },
-	{ 0, 0, { 0 }, 0, 0 }
-};
-
-char *ctl_dhcp_test[] = { DHCPD, "-nc", REQTEMP, '\0' };
-struct ctl ctl_dhcp[] = {
-	{ "enable",     "enable service",
-	    { DHCPD, "-c", REQTEMP, "-l", DHCPLEASES, NULL }, NULL, DB_X_ENABLE },
-	{ "disable",    "disable service",
-	    { PKILL, table, "dhcpd", NULL }, NULL, DB_X_DISABLE },
-	{ "edit",       "edit configuration",
-	    { "dhcp", (char *)ctl_dhcp_test, NULL }, call_editor, 0 },
-	{ 0, 0, { 0 }, 0, 0 }
-};
-
-char *ctl_snmp_test[] = { SNMPD, "-nf", REQTEMP, '\0' };
-struct ctl ctl_snmp[] = {
-	{ "enable",     "enable service",
-	    { SNMPD, "-f", REQTEMP, NULL }, NULL, DB_X_ENABLE },
-	{ "disable",    "disable service",
-	    { PKILL, table, "snmpd", NULL }, NULL, DB_X_DISABLE },
-	{ "edit",       "edit configuration",
-	    { "snmp", (char *)ctl_snmp_test, NULL }, call_editor, 0 },
-	{ "trap",	"send traps",
-	    { SNMPCTL, "trap", "send", REQ, OPT, NULL }, NULL, 0 },
-	{ 0, 0, { 0 }, 0, 0 }
-};
-
-char *ctl_sshd_test[] = { SSHD, "-tf", REQTEMP, '\0' };
-struct ctl ctl_sshd[] = {
-	{ "enable",	"enable service",
-	    { SSHD, "-f", REQTEMP, NULL }, NULL, DB_X_ENABLE },
-	{ "disable",	"disable service",
-	    { PKILL, table, "-f", SSHD, "-f", REQTEMP, NULL }, NULL, DB_X_DISABLE },
-	{ "edit",	"edit configuration",
-	    { "sshd", (char *)ctl_sshd_test, NULL }, call_editor, 0 },
-	{ 0, 0, { 0 }, 0, 0 }
-};
-
-char *ctl_ntp_test[] = { NTPD, "-nf", REQTEMP, '\0' };
-struct ctl ctl_ntp[] = {
-	{ "enable",     "enable service",
-	    { NTPD, "-sf", REQTEMP, NULL }, NULL, DB_X_ENABLE },
-	{ "disable",    "disable service",
-	    { PKILL, table, "ntpd", NULL }, NULL, DB_X_DISABLE },
-	{ "edit",       "edit configuration",
-	    { "ntp", (char *)ctl_ntp_test, NULL }, call_editor, 0 },
-	{ 0, 0, { 0 }, 0, 0 }
-};
-
-char *ctl_relay_test[] = { RELAYD, "-nf", REQTEMP, '\0' };
-struct ctl ctl_relay[] = {
-	{ "enable",	"enable service",
-	    { RELAYD, "-f", REQTEMP, NULL }, NULL, DB_X_ENABLE },
-        { "disable",	"disable service",
-	    { PKILL, table, "relayd", NULL }, NULL, DB_X_DISABLE },
-        { "edit",	"edit configuration",
-	    { "relay", (char *)ctl_relay_test, NULL }, call_editor, 0 },
-        { "reload",	"reload configuration",
-	    { RELAYCTL, "reload", NULL }, NULL, 0 },
-	{ "host",	"per-host control",
-	    { RELAYCTL, "host", OPT, OPT, NULL }, NULL, 0 },
-	{ "table",	"per-table control",
-	    { RELAYCTL, "table", OPT, OPT, NULL }, NULL, 0 },
-	{ "redirect",	"per-redirect control",
-	    { RELAYCTL, "redirect", OPT, OPT, NULL }, NULL, 0 },
-	{ "monitor",	"monitor mode",
-	    { RELAYCTL, "monitor", NULL }, NULL, 0 },
-	{ "poll",	"poll mode",
-	    { RELAYCTL, "poll", NULL }, NULL, 0 },
-	{ 0, 0, { 0 }, 0, 0 }
-};
-
-char *ctl_smtp_test[] = { SMTPD, "-nf", REQTEMP, '\0' };
-struct ctl ctl_smtp[] = {
-	{ "enable",	"enable service",
-	    { SMTPD, "-f", REQTEMP, NULL }, NULL, DB_X_ENABLE },
-	{ "disable",	"disable service",
-	    { PKILL, table, "smtpd", NULL }, NULL, DB_X_DISABLE },
-	{ "edit",	"edit configuration",
-	    { "smtp", (char *)ctl_smtp_test, NULL }, call_editor, 0 },
-	{ "log",	"brief/verbose logging configuration",
-	    { SMTPCTL, "log", REQ, NULL }, NULL, 0 },
-	{ "pause",	"pause mda/mta/smtp listener",
-	    { SMTPCTL, "pause", REQ, NULL }, NULL, 0 },
-	{ "remove",	"remove message or envelope",
-	    { SMTPCTL, "remove", REQ, NULL }, NULL, 0 },
-	{ "resume",	"resume mda/mta/smtp listener",
-	    { SMTPCTL, "resume", REQ, NULL }, NULL, 0 },
-	{ "schedule-all", "schedule all envelopes for immediate delivery",
-	    { SMTPCTL, "schedule-all", NULL }, NULL, 0 },
-	{ 0, 0, { 0 }, 0, 0 }
-};
-
-struct ctl ctl_ftpproxy[] = {
-	{ "enable",	"enable service",
-	    { FTPPROXY, "-D", "2", NULL }, NULL, DB_X_ENABLE },
-	{ "disable",	"disable service",
-	    { PKILL, table, "ftp-proxy", NULL }, NULL, DB_X_DISABLE },
-	{ 0, 0, { 0 }, 0, 0 }
-};
-
-struct ctl ctl_tftpproxy[] = {
-	{ "enable",     "enable service",
-	    { TFTPPROXY, "-v", "-l", "127.0.0.1", NULL }, NULL, DB_X_ENABLE },
-	{ "disable",    "disable service",
-	    { PKILL, table, "tftp-proxy", NULL }, NULL, DB_X_DISABLE },
-	{ 0, 0, { 0 }, 0, 0 }
-};
-
-struct ctl ctl_tftp[] = {
-	{ "enable", 	"enable service",
-	   { TFTPD, "-l", "127.0.0.1", NULL }, NULL, DB_X_ENABLE },
-	{ "disable",	"disable service",
-	   { PKILL, table, "tftpd", NULL }, NULL, DB_X_DISABLE },
-	{ 0, 0, { 0 }, 0, 0 }
-};
-
-struct ctl ctl_dns[] = {
-	{ "local-control", "local control over DNS settings",
-	    { RESOLVCONF_SYM, NULL, RESOLVCONF_TEMP, NULL }, ctl_symlink,
-	    DB_X_LOCAL },
-	{ "dhcp-control",   "DHCP client control over DNS settings",
-	    { RESOLVCONF_SYM, NULL, RESOLVCONF_DHCP, NULL }, ctl_symlink,
-	    DB_X_OTHER },
-	{ "edit",	    "edit DNS settings",
-	    { "dns", NULL, NULL }, call_editor, 0 },
-	{ 0, 0, { 0 }, 0, 0 }
-};
-
-struct ctl ctl_inet[] = {
-	{ "enable",     "enable service",
-	    { INETD, REQTEMP, NULL }, NULL, DB_X_ENABLE },
-	{ "disable",    "disable service",
-	    { PKILL, table, "inetd", NULL }, NULL, DB_X_DISABLE },
-	{ "edit",       "edit configuration",
-	    { "inet", NULL, NULL }, call_editor, 0 },
-	{ 0, 0, { 0 }, 0, 0 }
-};
-
-char *ctl_ldap_test[] = { LDAPD, "-nf", REQTEMP, '\0' };
-struct ctl ctl_ldap[] = {
-	{ "enable",	"enable service",
-	    { LDAPD, REQTEMP, NULL }, NULL, DB_X_ENABLE },
-	{ "disable",	"disable service",
-	    { PKILL, table, "ldapd", NULL }, NULL, DB_X_DISABLE },
-	{ "edit",       "edit configuration",
-	    { "ldap", (char *)ctl_ldap_test, NULL }, call_editor, 0 },
-	{ "log", 	"brief/verbose logging",
-	    { LDAPCTL, "log", REQ, NULL }, NULL, 0 },
-	{ "compact",	"compact all databases",
-	    { LDAPCTL, "compact", NULL }, NULL, 0 },
-	{ "index",	"re-index all databases",
-	    { LDAPCTL, "index", NULL }, NULL, 0 },
-	{ 0, 0, { 0 }, 0, 0, }
-};
-
+/* master daemon list */
 struct daemons ctl_daemons[] = {
-	{ "pf",		"PF",	ctl_pf,		PFCONF_TEMP,	0600, 1, 0 },
-	{ "ospf",	"OSPF", ctl_ospf,	OSPFCONF_TEMP,	0600, 0, RT_TABLEID_MAX },
-	{ "ospf6",	"OSPF6", ctl_ospf6,	OSPF6CONF_TEMP, 0600, 0, RT_TABLEID_MAX },
-	{ "bgp",	"BGP",	ctl_bgp,	BGPCONF_TEMP,	0600, 0, 0 },
-	{ "rip",	"RIP",	ctl_rip,	RIPCONF_TEMP,	0600, 0, RT_TABLEID_MAX },
-	{ "ldp",	"LDP",	ctl_ldp,	LDPCONF_TEMP,	0600, 0, 0 },
-	{ "relay",	"Relay", ctl_relay,	RELAYCONF_TEMP,	0600, 0, RT_TABLEID_MAX },
-	{ "ipsec",	"IPsec IKEv1", ctl_ipsec,	IPSECCONF_TEMP,	0600, 0, RT_TABLEID_MAX },
-	{ "ike",	"IPsec IKEv2", ctl_ike,		IKECONF_TEMP, 0600, 0, RT_TABLEID_MAX },
-	{ "rtadv",	"rtadvd", ctl_rtadv,	RTADVCONF_TEMP, 0600, 0, RT_TABLEID_MAX },
-	{ "dvmrp",	"DVMRP", ctl_dvmrp,	DVMRPCONF_TEMP, 0600, 0, RT_TABLEID_MAX },
-	{ "sasync",	"SAsync", ctl_sasync,	SASYNCCONF_TEMP,0600, 0, RT_TABLEID_MAX },
-	{ "dhcp",	"DHCP",	ctl_dhcp,	DHCPCONF_TEMP,	0600, 0, RT_TABLEID_MAX },
-	{ "snmp",	"SNMP",	ctl_snmp,	SNMPCONF_TEMP,	0600, 0, RT_TABLEID_MAX },
-	{ "sshd",	"SSH",	ctl_sshd,	SSHDCONF_TEMP,	0600, 0, RT_TABLEID_MAX },
-	{ "ntp",	"NTP",	ctl_ntp,	NTPCONF_TEMP,	0600, 0, 0 },
-	{ "ifstate",	"ifstate", ctl_ifstate,	IFSTATECONF_TEMP, 0600, 0, RT_TABLEID_MAX },
-	{ "ftp-proxy",  "FTP proxy", ctl_ftpproxy, FTPPROXY_TEMP, 0600, 0, RT_TABLEID_MAX },
-	{ "tftp-proxy",	"TFTP proxy", ctl_tftpproxy, TFTPPROXY_TEMP, 0600, 0, RT_TABLEID_MAX },
-	{ "tftp",	"TFTP", ctl_tftp,	TFTP_TEMP,	0600, 0, RT_TABLEID_MAX },
-	{ "nppp",	"PPP",	ctl_nppp,	NPPPCONF_TEMP,	0600, 0, RT_TABLEID_MAX },
-	{ "dns", 	"DNS", ctl_dns,		RESOLVCONF_TEMP,0644, 0, 0 },
-	{ "inet",	"Inet", ctl_inet,	INETCONF_TEMP,	0600, 0, RT_TABLEID_MAX },
-	{ "smtp",	"SMTP", ctl_smtp,	SMTPCONF_TEMP,	0600, 0, RT_TABLEID_MAX },
-	{ "ldap",	"LDAP", ctl_ldap,	LDAPCONF_TEMP,	0600, 0, RT_TABLEID_MAX },
-	{ "ifstate",	"Interface state", ctl_ifstate,	IFSTATECONF_TEMP, 0600, 0, RT_TABLEID_MAX },
-	{ 0, 0, 0, 0, 0, 0 }
+{ "pf",		"PF",	ctl_pf,		PFCONF_TEMP,	0600, 1, 0 },
+{ "ospf",	"OSPF",	ctl_ospf,	OSPFCONF_TEMP,	0600, 0, RT_TABLEID_MAX },
+{ "ospf6",	"OSPF6",ctl_ospf6,	OSPF6CONF_TEMP,	0600, 0, RT_TABLEID_MAX },
+{ "eigrp",	"EIGRP",ctl_eigrp,	EIGRPCONF_TEMP,	0600, 0, RT_TABLEID_MAX },
+{ "bgp",	"BGP",	ctl_bgp,	BGPCONF_TEMP,	0600, 0, 0 },
+{ "rip",	"RIP",	ctl_rip,	RIPCONF_TEMP,	0600, 0, RT_TABLEID_MAX },
+{ "ldp",	"LDP",	ctl_ldp,	LDPCONF_TEMP,	0600, 0, 0 },
+{ "relay",	"Relay",ctl_relay,	RELAYCONF_TEMP,	0600, 0, RT_TABLEID_MAX },
+{ "ipsec",	"IPsec IKEv1",ctl_ipsec,IPSECCONF_TEMP,	0600, 1, RT_TABLEID_MAX },
+{ "ike",	"IPsec IKEv2",ctl_ike,	IKECONF_TEMP,	0600, 0, RT_TABLEID_MAX },
+{ "rad",	"rad",	ctl_rad,	RADCONF_TEMP,	0600, 0, 0 },
+{ "dvmrp",	"DVMRP",ctl_dvmrp,	DVMRPCONF_TEMP,	0600, 0, RT_TABLEID_MAX },
+{ "sasync",	"SAsync",ctl_sasync,	SASYNCCONF_TEMP,0600, 0, RT_TABLEID_MAX },
+{ "snmp",	"SNMP",	ctl_snmp,	SNMPCONF_TEMP,	0600, 0, RT_TABLEID_MAX },
+{ "sshd",	"SSH",	ctl_sshd,	SSHDCONF_TEMP,	0600, 0, RT_TABLEID_MAX },
+{ "ntp",	"NTP",	ctl_ntp,	NTPCONF_TEMP,	0600, 0, 0 },
+{ "ifstate",	"ifstate",ctl_ifstate,	IFSTATECONF_TEMP,0600, 0, RT_TABLEID_MAX },
+{ "ftp-proxy",	"FTP proxy",ctl_ftpproxy,FTPPROXY_TEMP,	0600, 0, RT_TABLEID_MAX },
+{ "tftp-proxy",	"TFTP proxy",ctl_tftpproxy,TFTPPROXY_TEMP,0600, 0, RT_TABLEID_MAX },
+{ "tftp",	"TFTP",	ctl_tftp,	TFTP_TEMP,	0600, 0, RT_TABLEID_MAX },
+{ "nppp",	"PPP",	ctl_nppp,	NPPPCONF_TEMP,	0600, 0, RT_TABLEID_MAX },
+{ "resolv",	"resolvd",ctl_resolv,	NULL,		0, 0, 0 },
+{ "inet",	"Inet",	ctl_inet,	INETCONF_TEMP,	0600, 0, RT_TABLEID_MAX },
+{ "smtp",	"SMTP",	ctl_smtp,	SMTPCONF_TEMP,	0600, 0, RT_TABLEID_MAX },
+{ "ldap",	"LDAP",	ctl_ldap,	LDAPCONF_TEMP,	0600, 0, RT_TABLEID_MAX },
+{ "motd",        "MOTD",  ctl_motd,        MOTD_TEMP,0644, 0, 0 },
+{ "crontab",	"crontab",  ctl_crontab, CRONTAB_TEMP, 0600, 0, 0 },
+{ "scheduler",	"scheduler",  ctl_crontab, CRONTAB_TEMP, 0600, 0, 0 },
+{ "dhcp",	"DHCP",	ctl_dhcp,	DHCPCONF_TEMP,	0600, 0, RT_TABLEID_MAX },
+{ NULL, NULL, NULL, NULL, 0, 0, 0 }
 };
 
-void
-ctl_symlink(char *temp, char **z, char *real)
-{
-	rmtemp(temp);
-	symlink(real,temp);
-}
+/* a daemon nsh starts, and whether it runs, in a routing table */
+static struct facts_field daemon_fields[] = {
+	[DAEMON_NAME] =		{ "daemon",	FACT_STRING },
+	[DAEMON_PROGRAM] =	{ "program",	FACT_STRING },
+	[DAEMON_RTABLE] =	{ "rtable",	FACT_U64 },
+	[DAEMON_RUNNING] =	{ "running",	FACT_U64 },
+	[DAEMON_PROCS] =	{ "processes",	FACT_U64 },
+};
+struct facts_kind kind_daemon = { "daemon", daemon_fields, DAEMON_NFIELDS };
+
+/* per-daemon commands, and their C or executable functions */ 
+
+/* CRONTAB */
+struct ctl ctl_crontab[] = {
+        { "edit",           "edit scheduled background jobs",
+            { "crontab", NULL, NULL }, { NULL }, edit_crontab, 0, T_HANDLER },
+        { "install",           "install scheduled background job config",
+            { "crontab", NULL, NULL }, { NULL }, install_crontab, 0,
+	        T_HANDLER },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* MOTD */
+struct ctl ctl_motd[] = {
+        { "edit",           "edit message-of-the-day",
+            { "motd", NULL, NULL }, { NULL }, edit_motd, 0, T_HANDLER },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* PF, pfctl */
+struct ctl ctl_pf[] = {
+	{ "enable",	"enable pf firewall",
+	    { PFCTL, "-e", NULL }, { NULL }, NULL, DB_X_ENABLE, T_EXEC },
+	{ "disable",	"disable pf firewall",
+	    { PFCTL, "-d", NULL }, { NULL }, NULL, DB_X_DISABLE, T_EXEC },
+	{ "edit",	"edit, test and stage firewall rules",
+	    { "pf",  NULL },
+	    { PFCTL, "-nf", REQTEMP, NULL }, call_editor, 0, T_HANDLER_TEST },
+	{ "check-config",     "test and display staged firewall rules",
+            { PFCTL, "-nvvf", REQTEMP, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "reload",	"test and apply staged firewall rules",
+	    { PFCTL, "-f", REQTEMP, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* ospfd, ospfctl */
+struct ctl ctl_ospf[] = {
+	{ "enable",        "enable OSPFd daemon",
+	    { OSPFD, "-f", REQTEMP, NULL }, { NULL }, NULL, DB_X_ENABLE,
+	    T_EXEC },
+	{ "disable",       "disable OSPFd daemon",
+	    { PKILL, table, "ospfd", NULL }, { NULL }, NULL, DB_X_DISABLE,
+	    T_EXEC },
+	{ "edit",          "edit, test and stage OSPFd config",
+	    { "ospf", NULL },
+	    { OSPFD, "-nf", REQTEMP, NULL }, call_editor, 0, T_HANDLER_TEST },
+	{ "check-config",  "test staged OSPFd config",
+            { OSPFD, "-nvf", REQTEMP, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "reload",        "test and appy staged OSPFd config",
+	    { OSPFCTL, "reload", NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "fib",           "fib couple/decouple",
+	    { OSPFCTL, "fib", REQ, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "log",           "config OSPFd logging, brief/verbose",
+            { OSPFCTL, "log", REQ, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "show",	   "show OSPFd db/fib/interfaces/neighbor/rib/summary",
+	    { OSPFCTL, "show", REQ, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* ospf6d, ospf6ctl */
+struct ctl ctl_ospf6[] = {
+	{ "enable",         "enable OSPF6d OSPFv3 daemon",
+	    { OSPF6D, "-f", REQTEMP, NULL }, { NULL }, NULL, DB_X_ENABLE,
+	    T_EXEC },
+	{ "disable",        "disable OSPF6d OSPFv3 daemon",
+	    { PKILL, table, "ospf6d", NULL }, { NULL }, NULL, DB_X_DISABLE,
+	    T_EXEC },
+	{ "edit",           "edit, test and stage OSPF6d config",
+	    { "ospf6", NULL }, { OSPF6D, "-nf", REQTEMP, NULL },
+	    call_editor, 0, T_HANDLER_TEST },
+	{ "check-config",   "test staged OSPF6d config",   
+            { OSPF6D, "-nvf", REQTEMP, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "reload",         "test and apply staged OSPF6d config",
+	    { OSPF6CTL, "reload", NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "fib",            "fib couple/decouple",
+	    { OSPF6CTL, "fib", REQ, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "log",	    "config OSPF6d logging, brief/verbose",
+	    { OSPF6CTL, "log", REQ, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* eigrpd, eigrpctl */
+struct ctl ctl_eigrp[] = {
+	{ "enable",         "enable EIGRPd daemon",
+	    { EIGRPD, "-f", REQTEMP, NULL }, { NULL }, NULL, DB_X_ENABLE,
+	    T_EXEC },
+	{ "disable",        "disable EIGRPd daemon",
+	    { PKILL, table, "eigrpd", NULL }, { NULL }, NULL, DB_X_DISABLE,
+	    T_EXEC },
+	{ "edit",           "edit, test and stage EIGRPd config",
+	    { "eigrp", NULL }, { EIGRPD, "-nf", REQTEMP, NULL },
+	    call_editor, 0, T_HANDLER_TEST },
+        { "check-config",   "test staged EIGRPd config",
+            { EIGRPD, "-nvf", REQTEMP, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "reload",         "test and apply stagged EIGRPd config",
+	    { EIGRPCTL, "reload", NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "fib",            "fib couple/decouple",
+	    { EIGRPCTL, "fib", REQ, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "log",            "config EIGRPd loggging, brief/verbose",
+	    { EIGRPCTL, "log", REQ, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "show",           "show fib/interfaces/neighbor/topology/traffic",
+            { EIGRPCTL, "show", REQ, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* bgpd, bgpctl */
+struct ctl ctl_bgp[] = {
+	{ "enable",          "enable OpenBGPD daemon",
+	    { BGPD, "-f", REQTEMP, NULL }, { NULL }, NULL, DB_X_ENABLE,
+	    T_EXEC },
+	{ "disable",         "disable OpenBGPD daemon",
+	    { PKILL, "bgpd", NULL }, { NULL }, NULL, DB_X_DISABLE, T_EXEC },
+	{ "edit",            "edit, test and stage OpenBGPD config",
+	    { "bgp", NULL }, { BGPD, "-nf", REQTEMP, NULL, NULL },
+	    call_editor, 0, T_HANDLER_TEST },
+	{ "check-config",    "test staged OpenBGPD config",
+            { BGPD, "-nvf",REQTEMP, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "reload",          "test and apply staged OpenBGPD config",
+	    { BGPCTL, "reload", NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "fib",	     "fib couple/decouple",
+	    { BGPCTL, "fib", REQ, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "neighbor",	     "neighbor up/down/clear/refresh",
+	    { BGPCTL, "neighbor", OPT, OPT, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "network",	     "network add/delete/flush/show",
+	    { BGPCTL, "network", REQ, OPT, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* ripd, ripctl */
+struct ctl ctl_rip[] = {
+	{ "enable",          "enable RIPd Routing Internet protocol daemon",
+	    { RIPD, "-f", REQTEMP, NULL }, { NULL }, NULL, DB_X_ENABLE,
+	    T_EXEC },
+	{ "disable",         "disable RIPd daemon",
+	    { PKILL, table, "ripd", NULL }, { NULL }, NULL, DB_X_DISABLE, T_EXEC },
+	{ "edit",            "edit, test and stage RIPd config",
+	    { "rip", NULL }, { RIPD, "-nf", REQTEMP, NULL },
+	    call_editor, 0, T_HANDLER_TEST },
+	{ "check-config",    "test staged RIPd config",
+            { RIPD, "-nvf", REQTEMP, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "reload",	     "test and apply staged ripd config",
+	    { RIPCTL, "reload", NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "fib",             "fib couple/decouple",
+	    { RIPCTL, "fib", REQ, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "show",            "show fib/interfaces/neighbor/rib",
+            { RIPCTL, "show", REQ, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* ldpd, ldpctl */
+struct ctl ctl_ldp[] = {
+	{ "enable",        "enable Label Distribution Protocol Daemon",
+	   { LDPD, "-f", REQTEMP, NULL }, { NULL }, NULL, DB_X_ENABLE, T_EXEC },
+	{ "disable",       "disable LDPd ",
+	   { PKILL, "ldpd", NULL }, { NULL }, NULL, DB_X_DISABLE, T_EXEC },
+	{ "edit",          "edit, test and stage LDPd config",
+	   { "ldp", NULL }, { LDPD, "-nf", REQTEMP, NULL },
+	   call_editor, 0, T_HANDLER_TEST },
+        { "check-config",  "test staged LDPd config",
+            { LDPD, "-nvf", REQTEMP, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "reload",        "test and apply staged LDPd config",
+	    { LDPCTL, "reload", NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "fib",           "fib couple/decouple",
+	   { LDPCTL, "fib", REQ, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "clear",         "clear LDPd neighbors",
+            { LDPCTL, "clear", REQ, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "show",          "show LDPd fib/interfaces/discovery/neighbor/lib",
+            { LDPCTL, "show", REQ, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* isakmpd, ipsecctl */
+struct ctl ctl_ipsec[] = {
+	{ "enable",         "enable isakmpd IKEv1 daemon",
+	    { ISAKMPD, "-Kv", NULL }, { NULL }, NULL, DB_X_ENABLE, T_EXEC },
+	{ "disable",        "disable isakmpd IKEv1 daemon",
+	    { PKILL, table, "isakmpd", NULL }, { NULL }, NULL, DB_X_DISABLE,
+	    T_EXEC },
+	{ "edit",           "edit, test and stage isakmpd config",   
+	    { "ipsec", NULL }, { IPSECCTL, "-nf", REQTEMP, NULL },
+	    call_editor, 0, T_HANDLER_TEST },
+	{ "check-config",   "test staged isakmpd config",
+            { IPSECCTL, "-nvvf", REQTEMP, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "reload",         "test and apply staged isakmpd config",
+	    { IPSECCTL, "-f", REQTEMP, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "show",           "show isakmpd flow/sa/all",
+            { IPSECCTL, "-s", REQTEMP, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* iked, ikectl */
+struct ctl ctl_ike[] = {
+	{ "enable",         "enable Internet Key Exchange V2 daemon",
+	    { IKED, "-f", REQTEMP, NULL }, { NULL }, NULL, DB_X_ENABLE,
+	    T_EXEC },
+	{ "disable",        "disable IKEv2 daemon",
+	    { PKILL, table, "iked", NULL }, { NULL }, NULL, DB_X_DISABLE,
+	    T_EXEC },
+	{ "active",         "force IKE active mode",
+	    { IKECTL, "active", NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "passive",        "force IKE passive mode",
+	    { IKECTL, "passive", NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "couple",         "load SAs and flows into kernel",
+	    { IKECTL, "couple", NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "decouple",       "unload SAs and flows from kernel",
+	    { IKECTL, "decouple", NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "edit",           "edit, test and stage IKEd config",
+	    { "ike", NULL }, { IKED, "-nf", REQTEMP, NULL },
+	    call_editor, 0, T_HANDLER_TEST },
+	{ "check-config",   "test IKEd config",
+            { IKED, "-nvf", REQTEMP, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "reload",         "test and apply IKEd config",
+	    { IKECTL, "reload", NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "reset",          "reset IKEd state, policies, SAs or user database",
+	    { IKECTL, "reset", REQ, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "show",           "show security associations",
+            { IKECTL, "show", REQ, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* dvmrpd */
+struct ctl ctl_dvmrp[] = {
+	{ "enable",        "enable Distance Vector Multicast Routing daemon",
+	    { DVMRPD, "-f", REQTEMP, NULL }, { NULL }, NULL, DB_X_ENABLE,
+	    T_EXEC },
+	{ "disable",       "disable DVMRPd daemon",   
+	    { PKILL, table, "dvmrpd", NULL }, { NULL }, NULL, DB_X_DISABLE,
+	    T_EXEC },
+	{ "edit",          "edit,test and stage DVMRPd config",
+	    { "dvmrp",  NULL }, { DVMRPD, "-nf", REQTEMP, NULL },
+	    call_editor, 0, T_HANDLER_TEST },
+	{ "config-test",   "test staged DVMRPd config",
+            { DVMRPD, "-nvf", REQTEMP, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "log",           "configure DVMRPd logging, brief/verbose",
+            { DVMRPCTL, "log", REQ, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "show",          "show igmp/interfaces/mfc/neighbor/rib/summary",
+            { DVMRPCTL, "show", REQ, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* rad */
+struct ctl ctl_rad[] = {
+	{ "enable",	    "enable RAD Router Advertisement daemon",
+	    { RAD, "-f", REQTEMP, NULL }, { NULL }, NULL, DB_X_ENABLE, T_EXEC },
+	{ "disable",	    "disable RAD daemon",
+	    { PKILL, "rad", NULL }, { NULL }, NULL, DB_X_DISABLE, T_EXEC },
+	{ "edit",           "edit,test and stage RAD config",
+	    { "rad", NULL}, { RAD, "-nf", REQTEMP, NULL },
+	    call_editor, 0, T_HANDLER_TEST },
+	{ "check-config",   "test staged RAD config",                                   
+            { RAD, "-nvf", REQTEMP, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* ifstated */
+struct ctl ctl_ifstate[] = {
+	{ "enable",         "enable ifstated daemon",
+	    { IFSTATED, "-f", REQTEMP, NULL }, { NULL }, NULL, DB_X_ENABLE,
+	    T_EXEC },
+	{ "disable",        "disable ifstated daemon",
+	    { PKILL, table, "ifstated", NULL }, { NULL }, NULL, DB_X_DISABLE,
+	    T_EXEC },
+	{ "edit",           "edit, test and stage ifstated config",
+	    { "ifstate", NULL }, { IFSTATED, "-nf", REQTEMP, NULL },
+	    call_editor, 0, T_HANDLER_TEST },
+	{ "config-test",    "test staged ifstated config ",
+            { IFSTATED, "-nvf", REQTEMP, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* sasyncd */
+struct ctl ctl_sasync[] = {
+	{ "enable",       "enable SAsyncd daemon",
+	    { SASYNCD, "-c", REQTEMP, NULL }, { NULL }, NULL, DB_X_ENABLE,
+	    T_EXEC },
+	{ "disable",      "disable SAsyncd daemon",
+	    { PKILL, table, "sasyncd", NULL }, { NULL }, NULL, DB_X_DISABLE,
+	    T_EXEC },
+	{ "edit",         "edit, test and stage SAsyncd config",
+	    { "sasync", NULL }, { SASYNCD, "-nvvc", REQTEMP, NULL },
+	    call_editor, 0, T_HANDLER_TEST },
+	{ "check-config", "test staged SAsyncd config",
+            { SASYNCD, "-nvvc", REQTEMP, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* npppd, npppctl */
+struct ctl ctl_nppp[] = {
+	{ "enable",	    "enable nPPPd Point to Point Protocol daemon",
+	    { NPPPD, "-f", REQTEMP, NULL }, { NULL }, NULL, DB_X_ENABLE,
+	    T_EXEC },
+	{ "disable",	    "disable nNPPPd daemon",
+	    { PKILL, table, "npppd", NULL }, { NULL }, NULL, DB_X_DISABLE,
+	    T_EXEC },
+	{ "clear",	    "disconnect nPPPd sessions",
+	    { NPPPCTL, "clear", REQ, OPT, OPT, NULL }, { NULL }, NULL, 0,
+	    T_EXEC },
+	{ "session", 	    "show nPPPd sessions",
+	    { NPPPCTL, "session", REQ, OPT, OPT, NULL }, { NULL }, NULL, 0,
+	    T_EXEC },
+	{ "monitor",	    "monitor nPPPd sessions",
+	    { NPPPCTL, "monitor", REQ, OPT, OPT, NULL }, { NULL }, NULL, 0,
+	    T_EXEC },
+	{ "edit",	    "edit ,test and stage nPPPd config",
+	    { "nppp", NULL }, { NPPPD, "-nf", REQTEMP, NULL },
+	    call_editor, 0, T_HANDLER_TEST },
+	{ "check-config",   "test staged nPPPd config",
+            { NPPPD, "-nvf", REQTEMP, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* dhcpd */
+struct ctl ctl_dhcp[] = {
+	{ "enable",        "enable DHCPd daemon",
+	    { DHCPD, "-c", REQTEMP, "-l", DHCPLEASES, NULL }, { NULL },
+	    start_dhcpd, DB_X_ENABLE, T_HANDLER },
+	{ "disable",       "disable DHCPd daemon",
+	    { PKILL, table, "dhcpd", NULL }, { NULL }, NULL,
+	    DB_X_DISABLE, T_EXEC },
+	{ "edit",          "edit,test and stage DHCPd config",
+	    { "dhcp", NULL }, { DHCPD, "-nc", REQTEMP, NULL }, call_editor, 0,
+	    T_HANDLER_TEST },
+	{ "config-test",   "test staged DHCPd config",
+            { DHCPD, "-nc", REQTEMP, "-l", DHCPLEASES, NULL }, { NULL },
+	    NULL, 0, T_EXEC },
+	{ "restart",        "restart DHCPd daemon",
+	    { DHCPD, "-c", REQTEMP, "-l", DHCPLEASES, NULL }, { NULL },
+	    restart_dhcpd, DB_X_ENABLE, T_HANDLER },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* snmpd, snmpctl */
+struct ctl ctl_snmp[] = {
+	{ "enable",        "enable OpenSNMPD daemon",
+	    { SNMPD, "-f", REQTEMP, NULL }, { NULL }, NULL, DB_X_ENABLE,
+	    T_EXEC },
+	{ "disable",       "disable OpenSNMPD daemon",
+	    { PKILL, table, "snmpd", NULL }, { NULL }, NULL, DB_X_DISABLE,
+	    T_EXEC },
+	{ "edit",          "edit,test and stage OpenSNMPD config",
+	    { "snmp", NULL }, { SNMPD, "-nf", REQTEMP, NULL },
+	    call_editor, 0, T_HANDLER_TEST },
+	{ "config-test",   "test staged OpenSNMPD config",
+            { SNMPD, "-nvf", REQTEMP, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* sshd */
+struct ctl ctl_sshd[] = {
+	{ "enable",          "enable OpenSSHD daemon",
+	    { SSHD, "-f", REQTEMP, NULL }, { NULL }, NULL, DB_X_ENABLE,
+	    T_EXEC },
+	{ "disable",         "disable OpenSSHD daemon",
+	    { PKILL, table, "-f", SSHD, "-f", REQTEMP, NULL }, { NULL }, NULL,
+	    DB_X_DISABLE, T_EXEC },
+	{ "edit",            "edit, test and stage OpenSSHD config",
+	    { "sshd", NULL }, { SSHD, "-tf", REQTEMP, NULL }, call_editor, 0,
+	    T_HANDLER_TEST },
+	{ "config-test",     "test staged OpenSSHD config",
+            { SSHD, "-tf", REQTEMP, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* ntpd */
+struct ctl ctl_ntp[] = {
+	{ "enable",           "enable OpenNTPD daemon",
+	    { NTPD, "-f", REQTEMP, NULL }, { NULL }, NULL, DB_X_ENABLE,
+	    T_EXEC },
+	{ "disable",          "disable OpenNTPD daemon",
+	    { PKILL, "ntpd", NULL }, { NULL }, NULL, DB_X_DISABLE, T_EXEC },
+	{ "edit",             "edit, test and stage OpenNTPD config",
+	    { "ntp", NULL }, { NTPD, "-nf", REQTEMP, NULL },
+	    call_editor, 0, T_HANDLER_TEST },
+	{ "check-config",     "test staged OpenNTPD config",
+            { NTPD, "-nvf", REQTEMP, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* relayd, relayctl */
+struct ctl ctl_relay[] = {
+	{ "enable",           "enable load balancing relayd daemon",
+	    { RELAYD, "-f", REQTEMP, NULL }, { NULL }, NULL, DB_X_ENABLE,
+	    T_EXEC },
+        { "disable",	      "disable load balancing relayd daemon",
+	    { PKILL, table, "relayd", NULL }, { NULL }, NULL, DB_X_DISABLE,
+	    T_EXEC },
+        { "edit",             "edit, test and stage relayd config",
+	    { "relay", NULL }, { RELAYD, "-nf", REQTEMP, NULL },
+	    call_editor, 0, T_HANDLER_TEST },
+	{ "check-config",     "test staged relayd config",
+            { RELAYD, "-nvf", REQTEMP, NULL }, { NULL}, NULL, 0, T_EXEC },
+        { "reload",           "test and apply staged relayd config",
+	    { RELAYCTL, "reload", NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "host",             "per-host control",
+	    { RELAYCTL, "host", OPT, OPT, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "table",            "relayd per-table control",
+	    { RELAYCTL, "table", OPT, OPT, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "redirect",         "relayd per-redirect control",
+	    { RELAYCTL, "redirect", OPT, OPT, NULL }, { NULL }, NULL, 0,
+	    T_EXEC },
+	{ "monitor",          "enable relayd monitor mode",
+	    { RELAYCTL, "monitor", NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "poll",             "relayd poll mode",
+	    { RELAYCTL, "poll", NULL }, { NULL}, NULL, 0, T_EXEC },
+	{ "show",             "show hosts/redirects/relays/routers/sessions/summary",
+            { RELAYCTL, "show",  NULL }, { NULL}, NULL, 0, T_EXEC },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* smtpd, smptpdctl */
+struct ctl ctl_smtp[] = {
+	{ "enable",        "enable OpenSMTPD daemon",
+	    { SMTPD, "-f", REQTEMP, NULL }, { NULL }, NULL, DB_X_ENABLE,
+	    T_EXEC },
+	{ "disable",       "disable OpenSMTPD daemon",
+	    { PKILL, table, "smtpd", NULL }, { NULL }, NULL, DB_X_DISABLE,
+	    T_EXEC },
+	{ "edit",          "edit,test and stage OpenSMTPD config",
+	    { "smtp", NULL }, { SMTPD, "-nf", REQTEMP, NULL },
+	    call_editor, 0, T_HANDLER_TEST },
+	{ "config-test",   "test OpenSMTPD config",
+            { SMTPD, "-nvf", REQTEMP, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "log",           "set OpenSMTPD logging brief/verbose config",
+	    { SMTPCTL, "log", REQ, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "pause",         "pause mda/mta/smtp listener",
+	    { SMTPCTL, "pause", REQ, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "remove",        "remove message or envelope",
+	    { SMTPCTL, "remove", REQ, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "resume",        "resume mda/mta/smtp listener",
+	    { SMTPCTL, "resume", REQ, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "schedule-all",  "schedule all envelopes for immediate delivery",
+	    { SMTPCTL, "schedule-all", NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* ftpproxy */
+struct ctl ctl_ftpproxy[] = {
+	{ "enable",	"enable ftp proxy daemon",
+	    { FTPPROXY, "-D", "2", NULL }, { NULL }, NULL, DB_X_ENABLE,
+	    T_EXEC },
+	{ "disable",	"disable ftp proxy daemon",
+	    { PKILL, table, "ftp-proxy", NULL }, { NULL }, NULL, DB_X_DISABLE,
+	    T_EXEC },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* tftpproxy */
+struct ctl ctl_tftpproxy[] = {
+	{ "enable",     "enable TFTP proxy daemon",
+	    { TFTPPROXY, "-v", "-l", "127.0.0.1", NULL }, { NULL }, NULL,
+	    DB_X_ENABLE, T_EXEC },
+	{ "disable",    "disable TFTP proxy daemon",
+	    { PKILL, table, "tftp-proxy", NULL }, { NULL }, NULL,
+	    DB_X_DISABLE, T_EXEC },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* tftpd */
+struct ctl ctl_tftp[] = {
+	{ "enable", 	"enable TFTPd daemon",
+	   { TFTPD, "-l", "127.0.0.1", "/tftpboot", NULL }, { NULL }, NULL,
+	   DB_X_ENABLE, T_EXEC },
+	{ "disable",	"disable TFTPd daemon",
+	   { PKILL, table, "tftpd", NULL }, { NULL }, NULL, DB_X_DISABLE,
+	   T_EXEC },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* resolvd */
+struct ctl ctl_resolv[] = {
+	{ "enable",	"enable resolvd daemon",
+	   { RESOLVD, NULL }, { NULL }, NULL, DB_X_ENABLE_DEFAULT, T_EXEC },
+	{ "disable",    "disable resolvd daemon",
+	   { PKILL, "resolvd", NULL }, { NULL }, NULL, DB_X_DISABLE_ALWAYS,
+	   T_EXEC },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* inetd */
+struct ctl ctl_inet[] = {
+	{ "enable",     "enable inetd daemon",
+	    { INETD, REQTEMP, NULL }, { NULL }, NULL, DB_X_ENABLE, T_EXEC },
+	{ "disable",    "disable inetd daemon",
+	    { PKILL, table, "inetd", NULL }, { NULL }, NULL, DB_X_DISABLE,
+	    T_EXEC },
+	{ "edit",       "edit inetd superserver config",
+	    { "inet", NULL, NULL }, { NULL }, call_editor, 0, T_HANDLER_TEST },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
+
+/* ldapd, ldapctl */
+struct ctl ctl_ldap[] = {
+	{ "enable",         "enable LDAPd daemon",
+	    { LDAPD, REQTEMP, NULL }, { NULL }, NULL, DB_X_ENABLE, T_EXEC },
+	{ "disable",        "disable LDAPd daemon",
+	    { PKILL, table, "ldapd", NULL }, { NULL }, NULL, DB_X_DISABLE,
+	    T_EXEC },
+	{ "edit",           "edit, test and stage LDAPd config",
+	    { "ldap", NULL }, { LDAPD, "-nf", REQTEMP, NULL },
+	    call_editor, 0, T_HANDLER_TEST },
+	{ "config-test",    "test staged LDAPd config",
+            { LDAPD, "-nvf", REQTEMP, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "log",            "config LDAPd logging, brief/verbose",
+	    { LDAPCTL, "log", REQ, NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "compact",        "compact all LDAPd databases",
+	    { LDAPCTL, "compact", NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ "index",          "re-index all LDAPd databases",
+	    { LDAPCTL, "index", NULL }, { NULL }, NULL, 0, T_EXEC },
+	{ NULL, NULL, { NULL }, { NULL }, NULL, 0, 0 }
+};
 
 /* flag to other nsh sessions or nsh conf() that actions have been taken */
-void
+int
 flag_x(char *name, char *daemon, int dbflag, char *data)
 {
-	if (db_delete_flag_x_ctl(name, daemon) < 0) {
+	if (db_delete_flag_x_ctl(name, daemon, cli_rtable) < 0) {
 		printf("%% database delete failure ctl ctl\n");
-		return;
+		return -1;
 	}
 	if (dbflag == DB_X_REMOVE)
-		return;
+		return 0;
 	if (db_insert_flag_x(name, daemon, cli_rtable, dbflag, data) < 0) {
 		printf("%% database insert failure ctl ctl\n");
+		return -1;
 	}
+	return 0;
 }
 
+/* the main entry point into ctl.c from CLI */
 int
-ctlhandler(int argc, char **argv, char *modhvar)
+ctlhandler(int argc, char **argv, ...)
 {
 	struct daemons *daemons;
 	struct ctl *x;
-	char buf[64];
-	char *args[NOPTFILL] = { NULL, NULL, NULL, NULL, NULL, NULL, '\0' };
+	char tmpfile[PATH_MAX];
+	char *step_args[NOPTFILL] = { NULL, NULL, NULL, NULL, NULL, NULL };
 	char **fillargs;
+	int rv = 0;
+	int r;
 
 	/* loop daemon list to find table pointer */
 	daemons = (struct daemons *) genget(hname, (char **)ctl_daemons,
 	    sizeof(struct daemons));
-	if (daemons == 0) {
+	if (daemons == NULL || Ambiguous(daemons)) {
 		printf("%% Internal error - Invalid argument %s\n", argv[1]);
-		return 0;
-	} else if (Ambiguous(daemons)) {
-		printf("%% Internal error - Ambiguous argument %s\n", argv[1]);
-		return 0;
+		return -1;
 	}
 
-	if (cli_rtable > daemons->rtablemax) {
-		printf("%% Command %s not available via rtable %d\n", daemons->name, cli_rtable);
-		return 0;
+	/* in configure private, ctl_cand() checks the table */
+	if (!candidate && cli_rtable > daemons->rtablemax) {
+		printf("%% Command %s not available via rtable %d\n",
+		    daemons->name, cli_rtable);
+		rv = -1;
+		goto done;
 	}
 
-	if (modhvar) {
-		/* action specified or indented command specified */
-		if (argc == 2 && isprefix(argv[1], "rules")) {
-			/* skip 'X rules' line */
-			return(0);
-		}
-		if (isprefix(modhvar, "rules")) {
-			/* write indented line to tmp config file */
-			rule_writeline(daemons->tmpfile, daemons->mode,
-			    saveline);
-			return 0;
-		}
-	}
+	snprintf(table, sizeof(table), "-T%d", cli_rtable);
+	if (daemons->tmpfile)
+		snprintf(tmpfile, sizeof(tmpfile), "%s.%d", daemons->tmpfile,
+		    cli_rtable);
+
 	if (argc < 2 || argv[1][0] == '?') {
 		gen_help((char **)daemons->table, "", "", sizeof(struct ctl));
-		return 0;
+		goto done;
 	}
 
 	x = (struct ctl *) genget(argv[1], (char **)daemons->table,
 	    sizeof(struct ctl));
-	if (x == 0) {
+	if (x == NULL) {
 		printf("%% Invalid argument %s\n", argv[1]);
-		return 0;
+		rv = -1;
+		goto done;
 	} else if (Ambiguous(x)) {
 		printf("%% Ambiguous argument %s\n", argv[1]);
-		return 0;
+		rv = -1;
+		goto done;
 	}
 
-	fillargs = step_optreq(x->args, args, argc, argv, 2);
-	if (fillargs == NULL)
-		return 0;
+	fillargs = step_optreq(x->args, step_args, argc, argv, 2);
+	if (fillargs == NULL) {
+		rv = -1;
+		goto done;
+	}
 
+	if (candidate && (r = ctl_cand(daemons, x, fillargs)) != 0) {
+		rv = r == -1 ? -1 : 0;
+		goto done;
+	}
+
+	rv = ctl_run(daemons, x, fillargs, tmpfile);
+done:
+	return rv;
+}
+
+/*
+ * x, of daemon d's table, run with fillargs, its file tmpfile, and the
+ * state x leaves d in kept: as x's handler or program returns
+ */
+static int
+ctl_run(struct daemons *d, struct ctl *x, char **fillargs, char *tmpfile)
+{
+	char *tmp_args[NOPTFILL] = { NULL, NULL, NULL, NULL, NULL, NULL };
+	int nargs, rv = 0;
+
+	switch(x->type) {
+		/* fill_tmpfile will return 0 if tmpfile or args are NULL */
+	case T_HANDLER:
+		/* pointer to handler routine, fill main args */
+		nargs = fill_tmpfile(fillargs, tmpfile, tmp_args);
+		/* bump NOPTFILL when adding more arguments */
+		if (nargs < NOPTFILL) {
+			rv = (*x->handler)(nargs, tmp_args);
+		} else {
+			printf("%% handler %s %s requires too many "
+			    "arguments: %d\n", d->name, x->name, nargs);
+			rv = -1;
+		}
+	break;
+	case T_HANDLER_TEST:
+		/* pointer to handler with a test command, fill test args */
+		if (fill_tmpfile(x->test_args, tmpfile, tmp_args))
+			rv = (*x->handler)(1, &fillargs[0], tmp_args);
+		else	/* no test: inet */
+			rv = (*x->handler)(1, &fillargs[0], (char **)NULL);
+	break;
+	case T_EXEC:
+		/* command to execute via execv syscall, fill main args */
+		if (fill_tmpfile(fillargs, tmpfile, tmp_args))
+			rv = ctl_exec(tmp_args[0], tmp_args);
+		else
+			rv = ctl_exec(fillargs[0], fillargs);
+	break;
+	}
+
+	if (rv == 0 && x->flag_x != 0)
+		rv = flag_x("ctl", d->name, x->flag_x, NULL);
+	return rv;
+}
+
+/* The place in ctl_daemons of the daemon called name, or -1 */
+int
+ctl_daemon(char *name)
+{
+	int d;
+
+	for (d = 0; ctl_daemons[d].name != NULL; d++)
+		if (strcmp(ctl_daemons[d].name, name) == 0)
+			return d;
+	return -1;
+}
+
+/*
+ * What a configuration has daemon d do that word names in its table, as
+ * a commit's edits name it: the state it is left in, the flag of its
+ * first row with that flag, or CTL_ACT_FOLLOW, what follows its rules.
+ * -1 if word names neither: an operation, or no row
+ */
+int
+ctl_act(int d, char *word)
+{
+	struct daemons *dm = &ctl_daemons[d];
+	struct ctl *x;
+
+	x = (struct ctl *)genget(word, (char **)dm->table, sizeof(struct ctl));
+	if (x == NULL || Ambiguous(x))
+		return -1;
+	if (x == ctl_actrow(dm, CTL_ACT_FOLLOW))
+		return CTL_ACT_FOLLOW;
+	if (x->flag_x != 0 && x == ctl_actrow(dm, x->flag_x))
+		return x->flag_x;
+	return -1;
+}
+
+/*
+ * d's row that act names (ctl_act()): the reload that follows pf's or
+ * ipsec's rules, crontab's install, or the first with the flag of a
+ * state; or NULL. No act names any other row
+ */
+static struct ctl *
+ctl_actrow(struct daemons *d, int act)
+{
+	struct ctl *x;
+	char *follow = NULL;
+
+	switch (act) {
+	case CTL_ACT_FOLLOW:
+		if (d->doreload)
+			follow = "reload";
+		else if (d->table == ctl_crontab)
+			follow = "install";
+		for (x = d->table; follow != NULL && x->name != NULL; x++)
+			if (strcmp(x->name, follow) == 0)
+				return x;
+		return NULL;
+	case DB_X_ENABLE:
+	case DB_X_ENABLE_DEFAULT:
+	case DB_X_DISABLE:
+	case DB_X_DISABLE_ALWAYS:
+		for (x = d->table; x->name != NULL; x++)
+			if (x->flag_x == act)
+				return x;
+	}
+	return NULL;
+}
+
+/*
+ * Is d a daemon, and act what a configuration has it do (ctl_act()), or
+ * CTL_ACT_RULES, and d has rules?
+ */
+int
+ctl_takes(int d, int act)
+{
+	int n;
+
+	for (n = 0; ctl_daemons[n].name != NULL; n++)
+		;
+	if (d < 0 || d >= n)
+		return 0;
+	if (act == CTL_ACT_RULES)
+		return ctl_daemons[d].tmpfile != NULL;
+	return ctl_actrow(&ctl_daemons[d], act) != NULL;
+}
+
+/*
+ * Daemon d does act (ctl_takes()), in cli_rtable, as ctlhandler() runs
+ * its line: as it returns
+ */
+int
+ctl_do(int d, int act)
+{
+	struct daemons *dm = &ctl_daemons[d];
+	struct ctl *x = ctl_actrow(dm, act);
+	char tmpfile[PATH_MAX] = "", *argv[] = { dm->name, x->name, NULL };
+	char *step_args[NOPTFILL] = { NULL, NULL, NULL, NULL, NULL, NULL };
+	char **fillargs;
+
+	if (cli_rtable > dm->rtablemax) {
+		printf("%% Command %s not available via rtable %d\n",
+		    dm->name, cli_rtable);
+		return -1;
+	}
 	snprintf(table, sizeof(table), "-T%d", cli_rtable);
+	if (dm->tmpfile)
+		snprintf(tmpfile, sizeof(tmpfile), "%s.%d", dm->tmpfile,
+		    cli_rtable);
+	if ((fillargs = step_optreq(x->args, step_args, 2, argv, 2)) == NULL)
+		return -1;
+	return ctl_run(dm, x, fillargs, tmpfile);
+}
 
-	if (x->handler) {
-		fill_tmpfile((char **)fillargs[1], daemons->tmpfile, cli_rtable,
-		    buf, sizeof(buf));
-		(*x->handler)(fillargs[0], (char **)fillargs[1], fillargs[2]);
-	} else {
-		fill_tmpfile(fillargs, daemons->tmpfile, cli_rtable, buf,
-		    sizeof(buf));
-		cmdargs(fillargs[0], fillargs);
+/*
+ * Daemon d's rules in cli_rtable made text, len bytes, its lines, each
+ * ending in a newline, as the lines of a script's rules block were
+ * written: -1 if they could not be, said, else 0. A commit without
+ * admin writes no line from the first that needs it, and a file it
+ * wrote no line of stays as it was
+ */
+int
+ctl_setrules(int d, char *text, size_t len)
+{
+	struct daemons *dm = &ctl_daemons[d];
+	char path[PATH_MAX], *t, *p, *l;
+	char *need = NULL;
+	FILE *f = NULL;
+	int r = 0, line = 0;
+
+	if (cli_rtable > dm->rtablemax) {
+		printf("%% Command %s not available via rtable %d\n",
+		    dm->name, cli_rtable);
+		return -1;
 	}
+	if (dm->tmpfile == NULL) {
+		printf("%% %s has no rules\n", dm->name);
+		return -1;
+	}
+	if (admin_limited && len > 0 && ADMIN_WHOLE(dm)) {
+		printf("%% Commit refused: changing %s's rules%s needs the admin "
+		    "permission\n", dm->name, admin_in(cli_rtable));
+		admin_refused = 1;
+		return -1;
+	}
+	if (admin_limited && !admin_refused &&
+	    admin_scan(dm, text, len, &need) == -1) {
+		printf("%% ctl_setrules: %s\n", strerror(errno));
+		admin_refused = 1;
+		return -1;
+	}
+	snprintf(path, sizeof(path), "%s.%d", dm->tmpfile, cli_rtable);
+	if ((t = p = strndup(text, len)) == NULL) {
+		printf("%% ctl_setrules: %s\n", strerror(errno));
+		free(need);
+		return -1;
+	}
+	while ((l = strsep(&p, "\n")) != NULL && (p != NULL || *l != '\0')) {
+		if (admin_limited && (admin_refused ||
+		    (need != NULL && need[line] &&
+		    !admin_had(dm, cli_rtable, l)))) {
+			if (!admin_refused)
+				printf("%% Commit refused: this line of %s's "
+				    "rules%s needs the admin permission: %s\n",
+				    dm->name, admin_in(cli_rtable), l);
+			admin_refused = 1;
+			r = -1;
+			break;
+		}
+		line++;
+		/* the file, made at its first line */
+		if (f == NULL) {
+			if ((f = fopen(path, "w")) == NULL) {
+				printf("%% error opening %s for writing: %s\n",
+				    path, strerror(errno));
+				r = -1;
+				break;
+			}
+			fchmod(fileno(f), dm->mode);
+		}
+		fprintf(f, "%s\n", l);
+	}
+	if (f != NULL && fclose(f) == EOF) {
+		printf("%% %s: %s\n", path, strerror(errno));
+		r = -1;
+	}
+	free(t);
+	free(need);
+	return r;
+}
 
-	if (x->flag_x != 0)
-		flag_x("ctl", daemons->name, x->flag_x, NULL);
+/*
+ * Whether daemon's action is an operation, which nshd's system runs: what
+ * its table runs that is not its configuration, enable or disable, nor
+ * in configure, what configure private takes. 1 if so, else 0
+ */
+int
+ctl_op(char *daemon, char *action, int configuring)
+{
+	struct daemons *d;
+	struct ctl *x;
 
+	d = (struct daemons *)genget(daemon, (char **)ctl_daemons,
+	    sizeof(struct daemons));
+	if (d == NULL || Ambiguous(d))
+		return 0;
+	x = (struct ctl *)genget(action, (char **)d->table, sizeof(struct ctl));
+	if (x == NULL || Ambiguous(x))
+		return 0;
+	return x->type == T_EXEC && x->flag_x == 0 &&
+	    !(configuring && ctl_cand_takes(x));
+}
+
+/*
+ * A daemon's command in configure private: enable and disable leave the
+ * line conf prints for its state, edit edits its rules in the
+ * candidate, and its configuration test tests those, all in the
+ * candidate's rtable: 1 when done, -1 when it failed, said why. Returns
+ * 0 for the rest, which act on the running daemon as outside configure
+ * private.
+ */
+static int
+ctl_cand(struct daemons *d, struct ctl *x, char **fillargs)
+{
+	struct daemons *c;
+	struct ctl *t;
+	char *enable = "enable", stmt[64];
+	int rt, takes;
+
+	takes = ctl_cand_takes(x);
+	rt = takes ? cand_rtable : cli_rtable;
+	if (rt > d->rtablemax) {
+		printf("%% Command %s not available via rtable %d\n",
+		    d->name, rt);
+		return -1;
+	}
+	if (!takes)
+		return 0;
+	/* the name conf gives it: scheduler is crontab */
+	for (c = ctl_daemons; c->table != d->table; c++)
+		;
+	for (t = d->table; t->name != NULL; t++)
+		if (t->flag_x == DB_X_ENABLE ||
+		    t->flag_x == DB_X_ENABLE_DEFAULT) {
+			enable = t->name;
+			break;
+		}
+	snprintf(stmt, sizeof(stmt), "%s rules", c->name);
+
+	switch (x->flag_x) {
+	case DB_X_ENABLE:
+	case DB_X_ENABLE_DEFAULT:
+		if (cand_setting(ST_DEFAULT, "%s disable", c->name) == -1 ||
+		    cand_setting(ST_ON, "%s %s", c->name, enable) == -1)
+			return -1;
+		return 1;
+	case DB_X_DISABLE:
+		if (cand_setting(ST_DEFAULT, "%s %s", c->name, enable) == -1)
+			return -1;
+		return 1;
+	case DB_X_DISABLE_ALWAYS:
+		if (cand_setting(ST_DEFAULT, "%s %s", c->name, enable) == -1 ||
+		    cand_setting(ST_ON, "%s disable", c->name) == -1)
+			return -1;
+		return 1;
+	}
+	if (ctl_isedit(x))
+		return ctl_cand_edit(d, c->name,
+		    x->type == T_HANDLER_TEST ? x->test_args : NULL);
+	if (x->handler == install_crontab) {
+		/* crontab install follows the rules */
+		if (cand_rule(stmt, 0) == NULL) {
+			printf("%% no %s in the candidate\n", stmt);
+			return -1;
+		}
+		return 1;
+	}
+	return ctl_cand_test(d, c->name, fillargs);
+}
+
+/* Does configure private take x into the candidate? */
+static int
+ctl_cand_takes(struct ctl *x)
+{
+	switch (x->flag_x) {
+	case DB_X_ENABLE:
+	case DB_X_ENABLE_DEFAULT:
+	case DB_X_DISABLE:
+	case DB_X_DISABLE_ALWAYS:
+		return 1;
+	}
+	return ctl_isedit(x) || x->handler == install_crontab ||
+	    strcmp(x->name, "check-config") == 0 ||
+	    strcmp(x->name, "config-test") == 0;
+}
+
+/* Is x a daemon's edit of its rules? */
+static int
+ctl_isedit(struct ctl *x)
+{
+	return x->handler == call_editor || x->handler == edit_motd ||
+	    x->handler == edit_crontab;
+}
+
+/* Is action daemon's edit of its rules? */
+int
+ctl_edits(char *daemon, char *action)
+{
+	struct daemons *d;
+	struct ctl *x;
+
+	d = (struct daemons *)genget(daemon, (char **)ctl_daemons,
+	    sizeof(struct daemons));
+	if (d == NULL || Ambiguous(d))
+		return 0;
+	x = (struct ctl *)genget(action, (char **)d->table, sizeof(struct ctl));
+	return x != NULL && !Ambiguous(x) && ctl_isedit(x);
+}
+
+/*
+ * edit in a configure nshd has: daemon's rules in the session's
+ * candidate, in its rtable, asked of nshd, edited here as the user, and
+ * sent back; as a handler returns. Its test runs at commit check
+ */
+int
+ctl_nshd_edit(char *daemon)
+{
+	struct daemons *d;
+	char dir[] = "/tmp/nsh.XXXXXXXXXX", path[PATH_MAX];
+	int ret;
+
+	d = (struct daemons *)genget(daemon, (char **)ctl_daemons,
+	    sizeof(struct daemons));
+	if (d == NULL || Ambiguous(d) || d->tmpfile == NULL) {
+		printf("%% %s: no rules to edit\n", daemon);
+		return -1;
+	}
+	if (mkdtemp(dir) == NULL) {
+		printf("%% mkdtemp %s: %s\n", dir, strerror(errno));
+		return -1;
+	}
+	snprintf(path, sizeof(path), "%s/%s", dir, basename(d->tmpfile));
+	if ((ret = nshd_rules(d->name, nshd_rtable, 0, path)) == 0 &&
+	    (ret = edit_file(path, d->mode, d->propername, NULL)) == 0)
+		ret = nshd_rules(d->name, nshd_rtable, 1, path);
+	ctl_cand_unstage(dir, path);
+	return ret;
+}
+
+/*
+ * edit in configure private: its rules for d, called name, which the
+ * candidate takes even when its test fails, as outside configure
+ * private: 1, or -1 when it failed
+ */
+static int
+ctl_cand_edit(struct daemons *d, char *name, char **test)
+{
+	char dir[] = "/tmp/nsh.XXXXXXXXXX", path[PATH_MAX], stmt[64];
+	char *args[NOPTFILL] = { NULL }, *line = NULL;
+	StringList *lines;
+	size_t size = 0;
+	ssize_t len;
+	FILE *f;
+	int ret;
+
+	snprintf(stmt, sizeof(stmt), "%s rules", name);
+	if (ctl_cand_stage(d, stmt, dir, path, sizeof(path)) == -1)
+		return -1;
+	if (test != NULL && fill_tmpfile(test, path, args) == 0)
+		test = NULL;	/* no test: inet */
+	ret = edit_file(path, d->mode, d->propername,
+	    test != NULL ? args : NULL);
+	if ((f = fopen(path, "r")) == NULL) {
+		printf("%% %s: %s\n", path, strerror(errno));
+		ctl_cand_unstage(dir, path);
+		return -1;
+	}
+	lines = sl_init();
+	while ((len = getline(&line, &size, f)) != -1) {
+		if (len > 0 && line[len - 1] == '\n')
+			line[len - 1] = '\0';
+		sl_add(lines, strdup(line));
+	}
+	fclose(f);
+	if (cand_setrules(stmt, lines->sl_str, lines->sl_cur) == -1 ||
+	    ctl_cand_follow(d, name, lines->sl_cur > 0) == -1)
+		ret = -1;
+	free(line);
+	sl_free(lines, 1);
+	ctl_cand_unstage(dir, path);
+	return ret == -1 ? -1 : 1;
+}
+
+/*
+ * A daemon's rules in rtable's block of the candidate, through nshd's
+ * config: printed; or, with set, made the lines of text, as its edit
+ * makes them. 0, or -1, said why
+ */
+int
+ctl_cand_rules(char *name, int rtable, int set, char *text, size_t len)
+{
+	struct daemons *d, *c;
+	struct ctl *x;
+	StringList *lines;
+	char stmt[64], *l;
+	size_t n, i, j;
+	int saved, r = 0;
+
+	d = (struct daemons *)genget(name, (char **)ctl_daemons,
+	    sizeof(struct daemons));
+	if (d == NULL || Ambiguous(d)) {
+		printf("%% %s: no such daemon\n", name);
+		return -1;
+	}
+	for (x = d->table; x->name != NULL && !ctl_isedit(x); x++)
+		;
+	if (x->name == NULL) {
+		printf("%% %s has no rules to edit\n", d->name);
+		return -1;
+	}
+	if (rtable < 0 || rtable > d->rtablemax) {
+		printf("%% Command %s not available via rtable %d\n", d->name,
+		    rtable);
+		return -1;
+	}
+	if (!cand_hasrtable(rtable)) {
+		printf("%% rtable %d is not in the candidate\n", rtable);
+		return -1;
+	}
+	/* the name conf gives it: scheduler is crontab */
+	for (c = ctl_daemons; c->table != d->table; c++)
+		;
+	snprintf(stmt, sizeof(stmt), "%s rules", c->name);
+	saved = cand_rtable;
+	cand_rtable = rtable;
+	if (!set) {
+		for (n = 0; (l = cand_rule(stmt, n)) != NULL; n++)
+			printf("%s\n", l);
+		cand_rtable = saved;
+		return 0;
+	}
+	lines = sl_init();
+	for (i = 0; i < len; i = j + 1) {
+		for (j = i; j < len && text[j] != '\n'; j++)
+			;
+		if ((l = strndup(text + i, j - i)) == NULL) {
+			printf("%% %s: %s\n", stmt, strerror(errno));
+			r = -1;
+			break;
+		}
+		sl_add(lines, l);
+	}
+	if (r == 0 && (cand_setrules(stmt, lines->sl_str,
+	    lines->sl_cur) == -1 || ctl_cand_follow(d, c->name,
+	    lines->sl_cur > 0) == -1))
+		r = -1;
+	sl_free(lines, 1);
+	cand_rtable = saved;
+	return r;
+}
+
+/*
+ * A configuration test in configure private, on its rules for d: 1, or
+ * -1 when the test could not run, as T_EXEC outside configure private
+ */
+static int
+ctl_cand_test(struct daemons *d, char *name, char **fillargs)
+{
+	char dir[] = "/tmp/nsh.XXXXXXXXXX", path[PATH_MAX], stmt[64];
+	char *args[NOPTFILL] = { NULL };
+	int ret;
+
+	snprintf(stmt, sizeof(stmt), "%s rules", name);
+	if (cand_rule(stmt, 0) == NULL) {
+		printf("%% no %s in the candidate\n", stmt);
+		return -1;
+	}
+	if (ctl_cand_stage(d, stmt, dir, path, sizeof(path)) == -1)
+		return -1;
+	fill_tmpfile(fillargs, path, args);
+	ret = ctl_exec(args[0], args);
+	ctl_cand_unstage(dir, path);
+	return ret == -1 ? -1 : 1;
+}
+
+/*
+ * The candidate's lines of stmt in a file in a directory of its own,
+ * dir, a mkdtemp() template, named as d's staged file is, in path
+ */
+static int
+ctl_cand_stage(struct daemons *d, char *stmt, char *dir, char *path,
+    size_t len)
+{
+	char *l;
+	size_t n;
+	FILE *f;
+
+	/* nshd's config has no file of its own to stage */
+	if (in_config) {
+		printf("%% %s: not staged through nshd's configure private\n",
+		    stmt);
+		return -1;
+	}
+	if (mkdtemp(dir) == NULL) {
+		printf("%% mkdtemp %s: %s\n", dir, strerror(errno));
+		return -1;
+	}
+	snprintf(path, len, "%s/%s", dir, basename(d->tmpfile));
+	if ((f = fopen(path, "w")) == NULL) {
+		printf("%% %s: %s\n", path, strerror(errno));
+		rmdir(dir);
+		return -1;
+	}
+	for (n = 0; (l = cand_rule(stmt, n)) != NULL; n++)
+		fprintf(f, "%s\n", l);
+	if (fclose(f) == EOF) {
+		printf("%% %s: %s\n", path, strerror(errno));
+		ctl_cand_unstage(dir, path);
+		return -1;
+	}
+	return 0;
+}
+
+static void
+ctl_cand_unstage(char *dir, char *path)
+{
+	char lock[PATH_MAX];
+
+	snprintf(lock, sizeof(lock), "%s.lock", path);
+	unlink(lock);
+	unlink(path);
+	rmdir(dir);
+}
+
+/*
+ * Is line one of a daemon's, as conf() prints it: CTL_RULES, CTL_STATE
+ * or CTL_FOLLOW, with the daemon's name in name, or 0
+ */
+int
+ctl_line(char *line, char *name, size_t len)
+{
+	struct daemons *d;
+	struct ctl *x;
+	char w[2][64];
+
+	if (sscanf(line, "%63s %63s", w[0], w[1]) != 2)
+		return 0;
+	for (d = ctl_daemons; d->name != NULL; d++)
+		if (strcmp(d->name, w[0]) == 0)
+			break;
+	if (d->name == NULL)
+		return 0;
+	strlcpy(name, d->name, len);
+	if (strcmp(w[1], "rules") == 0)
+		return CTL_RULES;
+	if ((d->doreload && strcmp(w[1], "reload") == 0) ||
+	    (d->table == ctl_crontab && strcmp(w[1], "install") == 0))
+		return CTL_FOLLOW;
+	for (x = d->table; x->name != NULL; x++)
+		if (strcmp(x->name, w[1]) == 0)
+			return x->flag_x != 0 ? CTL_STATE : 0;
+	return 0;
+}
+
+/*
+ * Daemon name's rules in rtableid, which a commit's rules edit cannot
+ * write empty or take away: with keep, an empty file, else none
+ */
+int
+ctl_rules_clear(char *name, int rtableid, int keep)
+{
+	struct daemons *d;
+	char path[PATH_MAX];
+	int fd;
+
+	for (d = ctl_daemons; d->name != NULL; d++)
+		if (strcmp(d->name, name) == 0)
+			break;
+	if (d->name == NULL || d->tmpfile == NULL)
+		return -1;
+	if (admin_limited && ADMIN_WHOLE(d)) {
+		printf("%% Commit refused: changing %s's rules needs the admin "
+		    "permission\n", d->name);
+		return -1;
+	}
+	snprintf(path, sizeof(path), "%s.%d", d->tmpfile, rtableid);
+	if (!keep) {
+		if (unlink(path) == -1 && errno != ENOENT) {
+			printf("%% unlink %s: %s\n", path, strerror(errno));
+			return -1;
+		}
+		return 0;
+	}
+	if ((fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, d->mode)) == -1) {
+		printf("%% %s: %s\n", path, strerror(errno));
+		return -1;
+	}
+	fchmod(fd, d->mode);
+	close(fd);
+	return 0;
+}
+
+/*
+ * Test daemon name's rules, its n lines, as its edit tests them: -1 if
+ * the test fails, else 0, as for a daemon whose edit tests nothing
+ */
+int
+ctl_rules_test(char *name, char **lines, size_t n)
+{
+	char dir[] = "/tmp/nsh.XXXXXXXXXX", path[PATH_MAX];
+	char *args[NOPTFILL] = { NULL };
+	size_t i;
+	FILE *f;
+	int ret;
+
+	if (!ctl_rules_args(name, NULL, NULL, 0, NULL))
+		return 0;
+	if (mkdtemp(dir) == NULL) {
+		printf("%% mkdtemp %s: %s\n", dir, strerror(errno));
+		return -1;
+	}
+	ctl_rules_args(name, dir, path, sizeof(path), args);
+	if ((f = fopen(path, "w")) == NULL) {
+		printf("%% %s: %s\n", path, strerror(errno));
+		rmdir(dir);
+		return -1;
+	}
+	for (i = 0; i < n; i++)
+		fprintf(f, "%s\n", lines[i]);
+	if (fclose(f) == EOF) {
+		printf("%% %s: %s\n", path, strerror(errno));
+		ctl_cand_unstage(dir, path);
+		return -1;
+	}
+	ret = cmdargs(args[0], args) == 0 ? 0 : -1;
+	ctl_cand_unstage(dir, path);
+	return ret;
+}
+
+/*
+ * Does daemon name's edit test its rules? If so, 1, and with dir, the
+ * path in dir its rules are staged at, into path, and the test's
+ * arguments, which name it, into args, NOPTFILL of them
+ */
+int
+ctl_rules_args(char *name, char *dir, char *path, size_t len, char **args)
+{
+	struct daemons *d;
+	struct ctl *x;
+
+	for (d = ctl_daemons; d->name != NULL; d++)
+		if (strcmp(d->name, name) == 0)
+			break;
+	if (d->name == NULL || d->tmpfile == NULL)
+		return 0;
+	for (x = d->table; x->name != NULL; x++)
+		if (x->type == T_HANDLER_TEST && x->test_args[0] != NULL)
+			break;
+	if (x->name == NULL)
+		return 0;
+	if (dir != NULL) {
+		snprintf(path, len, "%s/%s", dir, basename(d->tmpfile));
+		fill_tmpfile(x->test_args, path, args);
+	}
 	return 1;
 }
 
-void
-fill_tmpfile(char **fillargs, char *tmpfile, int rtableid, char *buf, int len)
+/* The line conf prints after a daemon's rules: pf reload, crontab install */
+static int
+ctl_cand_follow(struct daemons *d, char *name, int rules)
 {
-	int i;
-
-	if (fillargs == NULL)
-		return;
-
-	for (i = 0; i < NOPTFILL - 1 ; i++) {
-		if(fillargs[i] == '\0' || fillargs[i] == NULL)
-			break;
-		if(fillargs[i] == REQTEMP) {
-			snprintf(buf, len, "%s.%d", tmpfile, cli_rtable);
-			fillargs[i] = buf;
-			break;
-		}
-	}
+	if (d->doreload && cand_setting(rules ? ST_ON : ST_DEFAULT,
+	    "%s reload", name) == -1)
+		return -1;
+	if (d->table == ctl_crontab && cand_setting(rules ? ST_ON :
+	    ST_DEFAULT, "%s install", name) == -1)
+		return -1;
+	return 0;
 }
 
-void
-call_editor(char *name, char **args, char *z)
+/*
+ * Run a daemon's program: -1 if it could not run, which cmdargs() said.
+ * Its exit status is its own to report: pfctl -e fails when pf is
+ * enabled, pkill when nothing matched.
+ */
+static int
+ctl_exec(char *cmd, char **args)
 {
+	int r;
+
+	r = cmdargs(cmd, args);
+	return r == -1 || r == 127 ? -1 : 0;
+}
+
+int
+restart_dhcpd(int argc, char **argv, ...)
+{
+	char *argv_pkill[] = { PKILL, table, "dhcpd", NULL };
+
+	if (ctl_exec(argv_pkill[0], argv_pkill) == -1)
+		return -1;
+	sleep(1);
+	return start_dhcpd(argc, argv);
+}
+
+/*
+ * Copy arguments from fillargs to tmp_args with temporary filenames
+ * expanded. Return the number of arguments stored in tmp_args.
+ * The maximum number of arguments allowed is NOPTFILL - 1.
+ */
+int
+fill_tmpfile(char **fillargs, char *tmpfile, char **tmp_args)
+{
+	int i, n;
+
+	if (fillargs == NULL || tmpfile == NULL)
+		return 0;
+
+	for (i = 0, n = 0; i < NOPTFILL - 1; i++) {
+		if(fillargs[i] == NULL) {
+			break;
+		}
+		if(fillargs[i] == REQTEMP) {
+			tmp_args[i] = tmpfile;
+		} else {
+			tmp_args[i] = fillargs[i];
+		}
+		n++;
+	}
+
+	return n;
+}
+
+int
+edit_crontab(int argc, char **argv, ...)
+{
+	char *name = argv[0];
+	char *crontab_argv[] = { CRONTAB, "-u", "root", "-l", NULL };
+	char tmpfile[PATH_MAX];
+	int found = 0, ret = -1;
+	struct daemons *daemons;
+	int fd = -1;
+
+	for (daemons = ctl_daemons; daemons->name != 0; daemons++)
+		if (strncmp(daemons->name, name, strlen(name)) == 0) {
+			found = 1;
+			break;
+		}
+
+	if (!found) {
+		printf("%% edit_crontab internal error\n");
+		return -1;
+	}
+
+	snprintf(tmpfile, sizeof(tmpfile), "%s.%d", daemons->tmpfile,
+	    cli_rtable);
+
+	fd = open(tmpfile, O_RDWR | O_EXCL);
+	if (fd == -1) {
+		if (errno != ENOENT) {
+			printf("%% open %s: %s\n", tmpfile, strerror(errno));
+			return -1;
+		}
+		fd = open(tmpfile, O_RDWR | O_CREAT | O_EXCL, daemons->mode);
+		if (fd == -1) {
+			printf("%% open %s: %s\n", tmpfile, strerror(errno));
+			return -1;
+		}
+
+		/* Populate temporary file with current crontab. */
+		if (cmdargs_output(CRONTAB, crontab_argv, fd, -1) != 0) {
+			printf("%% crontab -l command failed\n");
+			goto done;
+		}
+	}
+
+	if (edit_file(tmpfile, daemons->mode, daemons->propername, NULL) == 0) {
+		crontab_argv[3] = tmpfile;
+		if (cmdargs(CRONTAB, crontab_argv) != 0)
+			printf("%% failed to install crontab\n");
+		else
+			ret = 0;
+	}
+done:
+	close(fd);
+	return ret;
+}
+
+int
+install_crontab(int argc, char **argv, ...)
+{
+	char *name = argv[0];
+	char *crontab_argv[] = { CRONTAB, "-u", "root", NULL, NULL };
+	char tmpfile[PATH_MAX];
 	int fd, found = 0;
-	char *editor, tmpfile[64];
 	struct daemons *daemons;
 
 	for (daemons = ctl_daemons; daemons->name != 0; daemons++)
@@ -565,46 +1597,569 @@ call_editor(char *name, char **args, char *z)
 		}
 
 	if (!found) {
-		printf("%% call_editor internal error\n");
-		return;
+		printf("%% install_crontab internal error\n");
+		return -1;
 	}
 
-	snprintf(tmpfile, sizeof(tmpfile), "%s.%d", daemons->tmpfile, cli_rtable);
+	snprintf(tmpfile, sizeof(tmpfile), "%s.%d", daemons->tmpfile,
+	    cli_rtable);
 
-	/* acq lock, call editor, test config with cmd and args, release lock */
-
-	if ((editor = getenv("EDITOR")) == NULL || *editor == '\0')
-		editor = DEFAULT_EDITOR;
-	if ((fd = acq_lock(tmpfile)) > 0) {
-		char *argv[] = { editor, tmpfile, '\0' };
-		cmdargs(editor, argv);
-		chmod(tmpfile, daemons->mode);
-		fill_tmpfile(args, daemons->tmpfile, cli_rtable, tmpfile,
-		    sizeof(tmpfile));
-		if (args != NULL)
-			cmdargs(args[0], args);
-		rls_lock(fd);
-	} else
-		printf ("%% %s configuration is locked for editing\n",
+	if ((fd = acq_lock(tmpfile)) <= 0) {
+		printf("%% %s configuration is locked for editing\n",
 		    daemons->propername);
+		return -1;
+	}
+	crontab_argv[3] = tmpfile;
+	if (cmdargs(CRONTAB, crontab_argv) != 0) {
+		printf("%% failed to install crontab\n");
+		rls_lock(fd);
+		return -1;
+	}
+	rls_lock(fd);
+	return 0;
 }
 
 int
-rule_writeline(char *fname, mode_t mode, char *writeline)
+edit_motd(int argc, char **argv, ...)
 {
-	FILE *rulefile;
+	/* no test */
+	return call_editor(argc, argv, (char **)NULL);
+}
 
-	rulefile = fopen(fname, "a");
-	if (rulefile == NULL) {
-		printf("%% Rule write failed: %s\n", strerror(errno));
-		return(1);
+int
+call_editor(int argc, char **argv, ...)
+{
+	char *name = argv[0];
+	int found = 0;
+	char tmpfile[64];
+	struct daemons *daemons;
+	va_list ap;
+	char **args;
+
+	va_start(ap, argv);
+	args = va_arg(ap, char **);
+	va_end(ap);
+
+	for (daemons = ctl_daemons; daemons->name != 0; daemons++) {
+		if (strncmp(daemons->name, name, strlen(name)) == 0) {
+			found = 1;
+			break;
+		}
 	}
-	if (writeline[0] == ' ')
-		writeline++;
-	fprintf(rulefile, "%s", writeline);
-	fclose(rulefile);
-	chmod(fname, mode);
-	return(0);
+
+	if (!found) {
+		printf("%% call_editor internal error\n");
+		return -1;
+	}
+
+	snprintf(tmpfile, sizeof(tmpfile), "%s.%d", daemons->tmpfile,
+	    cli_rtable);
+	return edit_file(tmpfile, daemons->mode, daemons->propername, args);
+}
+
+static int
+provide_example_config(char *filename)
+{
+	char *name;
+	char path[PATH_MAX];
+	char tmpprompt[sizeof(prompt)];
+	FILE *f = NULL, *example = NULL;
+	int ret = 0, n, num;
+	char linebuf[64];
+	struct stat sb;
+	size_t len, remain;
+
+	memset(tmpprompt, 0, sizeof(tmpprompt));
+
+	f = fopen(filename, "a+");
+	if (f == NULL)
+		return 0;
+
+	if (fstat(fileno(f), &sb) == -1)
+		goto done;
+	
+	if (sb.st_size != 0)
+		goto done;
+
+	name = basename(filename);
+	if (name == NULL)
+		goto done;
+	
+	n = snprintf(path, sizeof(path), "/etc/examples/%s", name);
+	if (n < 0 || (size_t)n >= sizeof(path))
+		goto done;
+
+	/* Snip off rdomain trailer at end of filename. */
+	len = strlen(path);
+	while (len > 0) {
+		if (path[len - 1] >= '0' && path[len - 1] <= '9') {
+			path[len - 1] = '\0';
+			len--;
+		} else {
+			if (path[len - 1] == '.') {
+				path[len - 1] = '\0';
+				len--;
+			}
+			break;
+		}
+	}
+	if (len == 0)
+		goto done;
+
+	example = fopen(path, "r");
+	if (example == NULL)
+		goto done;
+
+	if (fstat(fileno(example), &sb) == -1)
+		goto done;
+
+	if (sb.st_size == 0)
+		goto done;
+	
+	snprintf(tmpprompt, sizeof(tmpprompt),
+	    "%s is empty. Load an example config? [Y/n]\n", filename);
+	setprompt(tmpprompt);
+
+	for (;;) {
+		const char *buf;
+
+		if (!isatty(STDIN_FILENO) || elp == NULL) {
+			if (fgets(linebuf, sizeof(linebuf), stdin) == NULL) {
+				ret = -1;
+				goto done;
+			}
+			buf = linebuf;
+		} else if ((buf = el_gets(elp, &num)) == NULL) {
+			if (num == -1) {
+				ret = -1;
+				goto done;
+			}
+			/* EOF, e.g. ^X or ^D via exit_i() in editing.c */
+			goto done;
+		}
+
+		if (strcmp(buf, "\n") == 0 ||
+		    strcasecmp(buf, "yes\n") == 0 ||
+		    strcasecmp(buf, "y\n") == 0)
+			break;
+
+		if (strcasecmp(buf, "no\n") == 0 ||
+		    strcasecmp(buf, "n\n") == 0)
+			goto done;
+
+		printf("%% Please type \"yes\" or \"no\"\n");
+	}
+
+	remain = sb.st_size;
+	while (remain > 0) {
+		char buf[8192];
+		ssize_t r;
+		size_t w;
+
+		len = (remain < sizeof(buf) ? remain : sizeof(buf));
+		r = fread(buf, 1, len, example);
+		if (r != len) {
+			if (ferror(f)) {
+				printf("%% fread %s: %s\n",
+				    path, strerror(errno));
+			}
+			break;
+		}
+
+		w = fwrite(buf, 1, len, f);
+		if (w != len) {
+			if (ferror(f)) {
+				printf("%% fwrite %s: %s\n",
+				    filename, strerror(errno));
+			}
+			break;
+		}
+
+		remain -= len;
+	}
+done:
+	fclose(f);
+	if (tmpprompt[0] != '\0')
+		restoreprompt();
+	if (example)
+		fclose(example);
+	return ret;
+}
+
+/*
+ * Edit tmpfile and test it with args: 0, or -1 if it could not, or the
+ * editor or the test failed, which say why
+ */
+int
+edit_file(char *tmpfile, mode_t mode, char *propername, char **args)
+{
+	char *editor;
+	int fd;
+	int ret = 0;
+	sig_t sigint;
+
+	/* acq lock, call editor, test config with cmd and args, release lock */
+	if ((editor = getenv("VISUAL")) == NULL) {
+		if ((editor = getenv("EDITOR")) == NULL)
+			editor = DEFAULT_EDITOR;
+	}
+	if ((fd = acq_lock(tmpfile)) > 0) {
+		char *argv[] = { editor, tmpfile, NULL };
+
+		/*
+		 * Temporarily disable command.c intr() handler to ensure
+		 * we tidy up the lock file when the user hits Ctrl-C at
+		 * at prompt.
+		 */
+		sigint = signal(SIGINT, SIG_IGN);
+
+		ret = provide_example_config(tmpfile);
+		if (ret == 0)
+			ret = cmdargs(editor, argv);
+		if (ret == 0 && chmod(tmpfile, mode) == -1) {
+			printf("%% chmod %o %s: %s\n",
+			    mode, tmpfile, strerror(errno));
+			ret = -1;
+		}
+		if (ret == 0 && args != NULL)
+			ret = cmdargs(args[0], args);
+		rls_lock(fd);
+		signal(SIGINT, sigint); /* Restore SIGINT handler. */
+	} else {
+		printf ("%% %s configuration is locked for editing\n",
+		    propername);
+		return -1;
+	}
+
+	return ret == 0 ? 0 : -1;
+}
+
+/*
+ * A commit runs, until admin_end(). If limited, its session lacks the
+ * admin permission, so it may change what needs admin only as it ran
+ * before: before, len bytes, the running configuration as it began
+ */
+void
+admin_begin(int limited, char *before, size_t len)
+{
+	admin_end();
+	admin_limited = limited;
+	if (limited)
+		admin_tree = conftree_mem(before, len,
+		    "the configuration before", conf_mode, conf_ordered);
+}
+
+void
+admin_end(void)
+{
+	conftree_free(admin_tree);
+	admin_tree = NULL;
+	admin_limited = 0;
+	admin_refused = 0;
+}
+
+/*
+ * May the commit running set line, a top-level statement that needs
+ * admin, or with no, take away what has line's key, its first keylen
+ * words? A commit without admin may set only a line that ran before it,
+ * and take away only what did not run: 1 if it may, else 0
+ */
+int
+admin_may(char *line, int no, int keylen)
+{
+	if (!admin_limited)
+		return 1;
+	if (admin_tree == NULL)
+		return 0;
+	if (no)
+		return !conftree_haskey(admin_tree, NULL, line, keylen);
+	return conftree_has(admin_tree, line);
+}
+
+/*
+ * The test of daemon name's rules, their text, for a session without
+ * admin: has it a line that needs admin and did not run before, in any
+ * rtable, as its commit's script would? -1 if it has, said, else 0
+ */
+int
+admin_test(char *name, char *text, size_t len)
+{
+	struct daemons *d;
+	char *t, *p, *l, *need = NULL;
+	int r = 0, line = 0;
+
+	if (!admin_limited)
+		return 0;
+	for (d = ctl_daemons; d->name != NULL; d++)
+		if (strcmp(d->name, name) == 0)
+			break;
+	if (d->name == NULL)
+		return 0;
+	if (len > 0 && ADMIN_WHOLE(d)) {
+		printf("%% Commit refused: changing %s's rules needs the admin "
+		    "permission\n", d->name);
+		return -1;
+	}
+	if (admin_scan(d, text, len, &need) == -1) {
+		printf("%% admin_test: %s\n", strerror(errno));
+		return -1;
+	}
+	if ((t = p = strndup(text, len)) == NULL) {
+		printf("%% admin_test: %s\n", strerror(errno));
+		free(need);
+		return -1;
+	}
+	while (r == 0 && (l = strsep(&p, "\n")) != NULL) {
+		if (need[line] && !admin_had(d, -1, l)) {
+			printf("%% Commit refused: this line of %s's rules "
+			    "needs the admin permission: %s\n", d->name, l);
+			r = -1;
+		}
+		line++;
+	}
+	free(t);
+	free(need);
+	return r;
+}
+
+/*
+ * Read daemon d's rules, text of len bytes, the way the parse.y family
+ * of daemons reads them, and mark in *needp (one byte per physical
+ * line, line 1 at index 0) every line of a statement that has a word
+ * that needs admin. The lexer drops a backslash before a character, so
+ * ha\ndle reads as handle; a backslash before a newline joins the two
+ * lines; a quoted string may hold either; a # begins a comment; and a
+ * statement may run over several lines, each of which is marked. A
+ * reserved word is read on the word the lexer builds, not the raw text,
+ * so an escape within it no longer hides it. Macros are not expanded: a
+ * $ or an = is itself a word that needs admin for the daemons that have
+ * one, so a macro that could hide a word needs admin to define or use.
+ * Returns the number of physical lines, *needp a new array of that many
+ * bytes, or -1 if it could not, with errno set
+ */
+struct lexin {
+	const char	*s;
+	size_t		 pos, len;
+	int		 line;
+	int		 ung[4];
+	int		 ungn;
+};
+
+static int
+lx_raw(struct lexin *x)
+{
+	if (x->ungn > 0)
+		return x->ung[--x->ungn];
+	if (x->pos >= x->len)
+		return EOF;
+	return (unsigned char)x->s[x->pos++];
+}
+
+static void
+lx_unget(struct lexin *x, int c)
+{
+	if (c == EOF)
+		return;
+	if (x->ungn < (int)(sizeof(x->ung) / sizeof(x->ung[0])))
+		x->ung[x->ungn++] = c;
+}
+
+/* A character the daemon's lexer reads, outside a quoted string */
+static int
+lx_getc(struct lexin *x)
+{
+	int c, next;
+
+	while ((c = lx_raw(x)) == '\\') {
+		next = lx_raw(x);
+		if (next != '\n') {
+			c = next;
+			break;
+		}
+		x->line++;		/* a backslash joins this line to the next */
+	}
+	if (c == '\t' || c == ' ') {
+		do {
+			c = lx_raw(x);
+		} while (c == '\t' || c == ' ');
+		lx_unget(x, c);
+		c = ' ';
+	}
+	return c;
+}
+
+/* every word of the token the lexer built that needs admin for d */
+static int
+lx_word(struct daemons *d, const char *tok)
+{
+	size_t i;
+
+	for (i = 0; i < sizeof(admin_words) / sizeof(admin_words[0]); i++) {
+		if (admin_words[i].table != NULL &&
+		    admin_words[i].table != d->table)
+			continue;
+		/* every daemon has a word, include */
+		if (strcasestr(tok, admin_words[i].word) != NULL)
+			return 1;
+	}
+	return 0;
+}
+
+#define LX_INSTR(c) \
+	(isalnum(c) || (ispunct(c) && (c) != '(' && (c) != ')' && \
+	(c) != '{' && (c) != '}' && (c) != '!' && (c) != '=' && \
+	(c) != '#' && (c) != ','))
+
+static int
+admin_scan(struct daemons *d, const char *text, size_t len, char **needp)
+{
+	struct lexin x = { .s = text, .len = len, .line = 1 };
+	char buf[8192], *need;
+	size_t i, nlines = 1;
+	int c, next, quotec, first = 0, hit = 0;
+
+	for (i = 0; i < len; i++)
+		if (text[i] == '\n')
+			nlines++;
+	if ((need = calloc(nlines + 1, 1)) == NULL)
+		return -1;
+
+	for (;;) {
+		char *p = buf;
+		int tokline;
+
+		while ((c = lx_getc(&x)) == ' ')
+			;			/* skip leading blanks */
+		tokline = x.line;
+		if (c == '#')			/* a comment to the newline */
+			while ((c = lx_getc(&x)) != '\n' && c != EOF)
+				;
+		if (c == '$') {			/* a macro: the $ is a word */
+			if (!first)
+				first = tokline;
+			if (lx_word(d, "$"))
+				hit = 1;
+			while ((c = lx_getc(&x)) != EOF &&
+			    (isalnum(c) || c == '_'))
+				;		/* read the macro's name */
+			lx_unget(&x, c);
+			continue;
+		}
+		if (c == '\'' || c == '"') {	/* a quoted string */
+			quotec = c;
+			for (;;) {
+				if ((c = lx_raw(&x)) == EOF)
+					break;
+				if (c == '\n') {
+					x.line++;
+					continue;
+				} else if (c == '\\') {
+					if ((next = lx_raw(&x)) == EOF)
+						break;
+					if (next == quotec || next == ' ' ||
+					    next == '\t')
+						c = next;
+					else if (next == '\n') {
+						x.line++;
+						continue;
+					} else
+						lx_unget(&x, next);
+				} else if (c == quotec)
+					break;
+				if (p + 1 < buf + sizeof(buf))
+					*p++ = c;
+			}
+			*p = '\0';
+			if (!first)
+				first = tokline;
+			if (lx_word(d, buf))	/* catches | inside a string */
+				hit = 1;
+			continue;
+		}
+		if (c == '-' || isdigit(c)) {	/* a number, never a word */
+			while ((c = lx_getc(&x)) != EOF && isdigit(c))
+				;
+			lx_unget(&x, c);
+			if (!first)
+				first = tokline;
+			continue;
+		}
+		if (isalnum(c) || c == ':' || c == '_') {	/* a word */
+			do {
+				if (p + 1 < buf + sizeof(buf))
+					*p++ = c;
+			} while ((c = lx_getc(&x)) != EOF && LX_INSTR(c));
+			lx_unget(&x, c);
+			*p = '\0';
+			if (!first)
+				first = tokline;
+			if (lx_word(d, buf))
+				hit = 1;
+			continue;
+		}
+		if (c == '\n' || c == EOF) {	/* end of the statement */
+			if (hit && first > 0)
+				for (i = (size_t)first - 1;
+				    i < (size_t)x.line && i < nlines; i++)
+					need[i] = 1;
+			first = 0;
+			hit = 0;
+			if (c == EOF)
+				break;
+			x.line++;
+			continue;
+		}
+		/* a single punctuation character, such as = */
+		if (!first)
+			first = tokline;
+		buf[0] = c;
+		buf[1] = '\0';
+		if (lx_word(d, buf))
+			hit = 1;
+	}
+
+	*needp = need;
+	return (int)nlines;
+}
+
+/* " in rtable N", for an rtable but 0, or "" */
+static const char *
+admin_in(int rtable)
+{
+	static char in[32];
+
+	in[0] = '\0';
+	if (rtable > 0)
+		snprintf(in, sizeof(in), " in rtable %d", rtable);
+	return in;
+}
+
+/* Had daemon d's rules in rtable, or any with -1, line before? */
+static int
+admin_had(struct daemons *d, int rtable, char *line)
+{
+	char *s, *path;
+	size_t i;
+	int id, r = 0;
+
+	if (admin_tree == NULL)
+		return 0;
+	if (rtable <= 0) {
+		if (asprintf(&path, "%s rules\n%s", d->name, line) == -1)
+			return 0;
+		r = conftree_has(admin_tree, path);
+		free(path);
+	}
+	for (i = 0; r == 0 && (s = conftree_stmt(admin_tree, i)) != NULL; i++) {
+		if (sscanf(s, "rtable %d", &id) != 1 ||
+		    (rtable != -1 && id != rtable))
+			continue;
+		if (asprintf(&path, "%s\n%s rules\n%s", s, d->name, line) == -1)
+			return 0;
+		r = conftree_has(admin_tree, path);
+		free(path);
+	}
+	return r;
 }
 
 int
@@ -621,12 +2176,12 @@ acq_lock(char *fname)
 	 */
 	snprintf(lockf, sizeof(lockf), "%s.lock", fname);
 	if ((fd = open(lockf, O_RDWR | O_CREAT, 0600)) == -1)
-			return(-1);
+			return -1;
 	if (flock(fd, LOCK_EX | LOCK_NB) == 0)
-		return(fd);
+		return fd;
 	else {
 		close(fd);
-		return(-1);
+		return -1;
 	}
 }
 
@@ -646,4 +2201,198 @@ rmtemp(char *file)
 		if (errno != ENOENT)
 			printf("%% Unable to remove temporary file %s: %s\n",
 			    file, strerror(errno));
+}
+
+int
+start_dhcpd(int argc, char **argv, ...)
+{
+	struct if_nameindex *ifn_list, *ifnp;
+	char **dhcpd_args = NULL;
+	size_t niface = 0;
+	int ifs = -1, i, ret = -1;
+	char leasedb[PATH_MAX];
+
+	/*
+	 * For rdomains other than zero dhcpd(8) expects a list of
+	 * interfaces on its command line. If no interface arguments
+	 * are given then dhcpd will move itself into rdomain zero
+	 * so we really must specify a list here.
+	 *
+	 * All named interfaces must be part of the same rdomain. We
+	 * provide the list of all interfaces in our current rdomain.
+	 * dhcpd will listen on any with matching subnets in dhcpd.conf.
+	 */
+	if ((ifn_list = if_nameindex()) == NULL) {
+		printf("%% %s: if_nameindex failed\n", __func__);
+		return -1;
+	}
+
+	if ((ifs = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+		printf("%% %s socket: %s\n", __func__, strerror(errno));
+		goto done;
+	}
+
+	for (ifnp = ifn_list; ifnp->if_name != NULL; ifnp++) {
+		int flags, rdomain;
+
+		flags = get_ifflags(ifnp->if_name, ifs);
+		if ((flags & IFF_LOOPBACK) ||
+		    (flags & IFF_POINTOPOINT) ||
+		    (!(flags & IFF_BROADCAST)))
+			continue;
+
+		rdomain = get_rdomain(ifs, ifnp->if_name);
+		if (rdomain == cli_rtable)
+			niface++;
+	}
+
+	dhcpd_args = calloc(5 + niface + 1, sizeof(char *));
+	if (dhcpd_args == NULL) {
+		printf("%% calloc: %s\n", strerror(errno));
+		goto done;
+	}
+
+	i = 0;
+	dhcpd_args[i++] = argv[0]; /* dhcpd */
+	dhcpd_args[i++] = argv[1]; /* -c */
+	dhcpd_args[i++] = argv[2]; /* dhcpd.conf */
+	dhcpd_args[i++] = argv[3]; /* -l */
+	if (cli_rtable != 0) {
+		snprintf(leasedb, sizeof(leasedb), "%s.%d",
+		    argv[4], cli_rtable);
+		dhcpd_args[i++] = leasedb; /* rdomain's leasedb */
+	} else 
+		dhcpd_args[i++] = argv[4]; /* default leasedb */
+
+	for (ifnp = ifn_list; ifnp->if_name != NULL; ifnp++) {
+		int flags, rdomain;
+
+		flags = get_ifflags(ifnp->if_name, ifs);
+		if ((flags & IFF_LOOPBACK) ||
+		    (flags & IFF_POINTOPOINT) ||
+		    (!(flags & IFF_BROADCAST)))
+			continue;
+
+		rdomain = get_rdomain(ifs, ifnp->if_name);
+		if (rdomain == cli_rtable)
+			dhcpd_args[i++] = ifnp->if_name;
+	}
+	dhcpd_args[i] = NULL;
+
+	ret = ctl_exec(argv[0], dhcpd_args);
+done:
+	if (ifs != -1)
+		close(ifs);
+	if_freenameindex(ifn_list);
+	free(dhcpd_args);
+	return ret;
+}
+
+/*
+ * Each daemon nsh starts, as facts: in table 0, and in each other
+ * routing table its program runs in, whether it runs, and how many
+ * processes of its program do. pf runs when it is enabled, which only
+ * with pf is asked
+ */
+int
+daemons_facts(struct facts_out *o, int pf)
+{
+	struct facts_value v[DAEMON_NFIELDS];
+	struct kinfo_proc *kp = NULL;
+	struct daemons *d;
+	struct ctl *x;
+	char prog[KI_MAXCOMLEN];
+	u_int count[RT_TABLEID_MAX + 1];
+	int mib[6] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0,
+	    sizeof(struct kinfo_proc), 0 };
+	size_t i, n, len;
+	int rt, on, r = 0;
+
+	for (;;) {
+		if (sysctl(mib, 6, NULL, &len, NULL, 0) == -1) {
+			printf("%% daemons: kern.proc: %s\n", strerror(errno));
+			return -1;
+		}
+		/* and room for some started since */
+		len += 16 * sizeof(*kp);
+		mib[5] = len / sizeof(*kp);
+		if ((kp = malloc(len)) == NULL) {
+			printf("%% daemons: %s\n", strerror(errno));
+			return -1;
+		}
+		if (sysctl(mib, 6, kp, &len, NULL, 0) == 0)
+			break;
+		free(kp);
+		if (errno != ENOMEM) {
+			printf("%% daemons: kern.proc: %s\n", strerror(errno));
+			return -1;
+		}
+	}
+	n = len / sizeof(*kp);
+	for (d = ctl_daemons; r == 0 && d->name != NULL; d++) {
+		/* what enables it runs its program, but for pf's */
+		for (x = d->table; x->name != NULL &&
+		    x->flag_x != DB_X_ENABLE && x->flag_x != DB_X_ENABLE_DEFAULT;
+		    x++)
+			;
+		if (x->name == NULL || x->args[0] == NULL)
+			continue;
+		memset(v, 0, sizeof(v));
+		facts_string(&v[DAEMON_NAME], d->name);
+		if (d->table == ctl_pf) {
+			facts_string(&v[DAEMON_PROGRAM], "pf");
+			facts_u64(&v[DAEMON_RTABLE], 0);
+			if (pf && (on = pf_enabled()) != -1)
+				facts_u64(&v[DAEMON_RUNNING], on);
+			r = facts_record(o, &kind_daemon, v);
+			continue;
+		}
+		strlcpy(prog, basename(x->args[0]), sizeof(prog));
+		memset(count, 0, sizeof(count));
+		for (i = 0; i < n; i++)
+			if (kp[i].p_rtableid <= RT_TABLEID_MAX &&
+			    strcmp(kp[i].p_comm, prog) == 0)
+				count[kp[i].p_rtableid]++;
+		facts_string(&v[DAEMON_PROGRAM], prog);
+		for (rt = 0; r == 0 && rt <= RT_TABLEID_MAX; rt++) {
+			if (rt != 0 && count[rt] == 0)
+				continue;
+			facts_u64(&v[DAEMON_RTABLE], rt);
+			facts_u64(&v[DAEMON_RUNNING], count[rt] != 0);
+			facts_u64(&v[DAEMON_PROCS], count[rt]);
+			r = facts_record(o, &kind_daemon, v);
+		}
+	}
+	free(kp);
+	return r;
+}
+
+/* a daemon, as show daemons prints it, the labels before the first */
+void
+daemons_render(struct frec *r, int n)
+{
+	const struct facts_value *rt, *on, *procs;
+	const char *name, *prog;
+
+	if (n == 0)
+		printf("%-12s %-12s %6s  %s\n", "Daemon", "Program", "Rtable",
+		    "State");
+	name = fs(r, DAEMON_NAME);
+	prog = fs(r, DAEMON_PROGRAM);
+	rt = FV(r, DAEMON_RTABLE, FACT_U64);
+	on = FV(r, DAEMON_RUNNING, FACT_U64);
+	procs = FV(r, DAEMON_PROCS, FACT_U64);
+	printf("%-12s %-12s %6llu  ", name != NULL ? name : "?",
+	    prog != NULL ? prog : "?", rt != NULL ?
+	    (unsigned long long)rt->v.u : 0ULL);
+	if (on == NULL)
+		printf("-\n");
+	else if (procs == NULL)
+		printf("%s\n", on->v.u ? "enabled" : "disabled");
+	else if (on->v.u)
+		printf("running, %llu process%s\n",
+		    (unsigned long long)procs->v.u, procs->v.u == 1 ? "" :
+		    "es");
+	else
+		printf("not running\n");
 }

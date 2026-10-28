@@ -13,6 +13,7 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -26,11 +27,44 @@ int sq3simple(char *, StringList *);
 
 #define QSZ 1024 /* maximum query text size */
 
+void
+db_create(void)
+{
+	/* create temporal tables (if they aren't already there) */
+	if (db_create_table_rtables() < 0)
+		printf("%% database rtables creation failed\n");
+	if (db_create_table_flag_x("ctl") < 0)
+		printf("%% database ctl creation failed\n");
+	if (db_create_table_flag_x("dhcrelay") < 0)
+		printf("%% database dhcrelay creation failed\n");
+	if (db_create_table_flag_x("ipv6linklocal") < 0)
+		printf("%% database ipv6linklocal creation failed\n");
+	if (db_create_table_flag_x("lladdr") < 0)
+		printf("%% database lladdr creation failed\n");
+	if (db_create_table_flag_x("authkey") < 0)
+		printf("%% database authkey creation failed\n");
+	if (db_create_table_flag_x("peerkey") < 0)
+		printf("%% database peerkey creation failed\n");
+	if (db_create_table_nameservers() < 0)
+		printf("%% database nameservers creation failed\n");
+	if (db_create_table_flag_x("pppoeipaddrmode") < 0)
+		printf("%% database pppoeipaddrmode creation failed\n");
+	if (db_create_table_flag_x("pin") < 0)
+		printf("%% database pin creation failed\n");
+}
+
 int
 db_create_table_rtables(void)
 {
 	char query[]="CREATE TABLE IF NOT EXISTS rtables (rtable INTEGER PRIMARY KEY, name TEXT)";
-	return(sq3simple(query, NULL));
+	return sq3simple(query, NULL);
+}
+
+int
+db_create_table_nameservers(void)
+{
+	char query[]="CREATE TABLE IF NOT EXISTS nameservers (nameserver TEXT)";
+	return sq3simple(query, NULL);
 }
 
 int
@@ -40,7 +74,7 @@ db_create_table_flag_x(char *name)
 
 	snprintf(query, QSZ, "CREATE TABLE IF NOT EXISTS %s (ctl TEXT, rtable INTEGER, flag INTEGER,"
 	    "data TEXT)", name);
-	return(sq3simple(query, NULL));
+	return sq3simple(query, NULL);
 }
 
 int
@@ -49,8 +83,8 @@ db_insert_flag_x(char *name, char *ctl, int rtableid, int flag, char *data)
 	char		query[QSZ];
 
 	snprintf(query, QSZ, "INSERT INTO '%s' VALUES('%s', %d, %d, '%s')",
-	    name, ctl, rtableid, flag, data);
-	return(sq3simple(query, NULL));
+	    name, ctl, rtableid, flag, data ? data : "");
+	return sq3simple(query, NULL);
 }
 
 int
@@ -59,7 +93,7 @@ db_insert_rtables(int rtableid, char *name)
 	char		query[QSZ];
 
 	snprintf(query, QSZ, "INSERT INTO 'rtables' VALUES(%d, '%s')", rtableid, name);
-	return(sq3simple(query, NULL));
+	return sq3simple(query, NULL);
 }
 
 int
@@ -68,16 +102,26 @@ db_delete_rtables_rtable(int rtableid)
 	char		query[QSZ];
 
 	snprintf(query, QSZ, "DELETE FROM 'rtables' WHERE rtable=%d", rtableid);
-	return(sq3simple(query, NULL));
+	return sq3simple(query, NULL);
 }
 
 int
-db_delete_flag_x_ctl(char *name, char *ctl)
+db_insert_nameserver(char *nameserver)
 {
 	char		query[QSZ];
 
-	snprintf(query, QSZ, "DELETE FROM '%s' WHERE ctl='%s' AND rtable=%d", name, ctl, cli_rtable);
-	return(sq3simple(query, NULL));
+	snprintf(query, QSZ, "INSERT OR REPLACE INTO 'nameservers' VALUES('%s')",
+	    nameserver);
+	return sq3simple(query, NULL);
+}
+
+int
+db_delete_flag_x_ctl(char *name, char *ctl, int rtable)
+{
+	char		query[QSZ];
+
+	snprintf(query, QSZ, "DELETE FROM '%s' WHERE ctl='%s' AND rtable=%d", name, ctl, rtable);
+	return sq3simple(query, NULL);
 }
 
 int
@@ -86,7 +130,16 @@ db_delete_flag_x_ctl_data(char *name, char *ctl, char *data)
 	char		query[QSZ];
 
 	snprintf(query, QSZ, "DELETE FROM '%s' WHERE ctl='%s' AND data='%s'", name, ctl, data);
-	return(sq3simple(query, NULL));
+	return sq3simple(query, NULL);
+}
+
+int
+db_delete_nameservers(void)
+{
+	char		query[QSZ];
+
+	snprintf(query, QSZ, "DELETE FROM 'nameservers'");
+	return sq3simple(query, NULL);
 }
 
 int
@@ -95,7 +148,7 @@ db_select_flag_x_ctl_data(StringList *words, char *name, char *ctl, char *data)
 	char		query[QSZ];
 
 	snprintf(query, QSZ, "SELECT data FROM '%s' WHERE ctl='%s' AND data='%s'", name, ctl, data);
-	return(sq3simple(query, words));
+	return sq3simple(query, words);
 }
 
 int
@@ -104,14 +157,14 @@ db_select_flag_x_ctl(StringList *words, char *name, char *ctl)
 	char		query [QSZ];
 
 	snprintf(query, QSZ, "SELECT data FROM '%s' WHERE ctl='%s'", name, ctl);
-	return(sq3simple(query, words));
+	return sq3simple(query, words);
 }
 
 int
 db_select_rtable_rtables(StringList *words)
 {
 	char query[]="SELECT rtable FROM rtables";
-	return(sq3simple(query, words));
+	return sq3simple(query, words);
 }
 
 int
@@ -120,16 +173,7 @@ db_select_rtables_rtable(StringList *words, int rtableid)
 	char		query[QSZ];
 
 	snprintf(query, QSZ, "SELECT name FROM rtables WHERE rtable=%d", rtableid);
-	return(sq3simple(query,words));
-}
-
-int
-db_select_flag_x_ctl_rtable(StringList *words, char *name, int rtableid)
-{
-	char            query[QSZ];
-
-	snprintf(query, QSZ, "SELECT ctl FROM %s WHERE rtable=%d", name, rtableid);
-	return(sq3simple(query, words));
+	return sq3simple(query, words);
 }
 
 int
@@ -139,7 +183,7 @@ db_select_flag_x_data_ctl_rtable(StringList *words, char *name, char *ctl, int r
 
 	snprintf(query, QSZ, "SELECT data FROM %s WHERE ctl='%s' AND rtable=%d",
 	    name, ctl, rtableid);
-	return(sq3simple(query, words));
+	return sq3simple(query, words);
 }
 
 int
@@ -168,51 +212,69 @@ db_select_flag_x_dbflag_rtable(char *name, char *ctl, int rtableid)
 }
 
 int
+db_select_nameservers(StringList *words)
+{
+	char query[]="SELECT nameserver FROM nameservers";
+	return sq3simple(query, words);
+}
+
+int
 db_select_name_rtable(StringList *words, int rtableid)
 {
 	char		query[QSZ];
 
 	snprintf(query, QSZ, "SELECT name FROM rtables WHERE rtable='%d'", rtableid);
-	return(sq3simple(query, words));
+	return sq3simple(query, words);
 }
 
 /* simple query execution, dump results straight into words */
 int
 sq3simple(char *sql, StringList *words)
 {
-	sqlite3		*db;
+	sqlite3		*db = NULL;
 	sqlite3_stmt	*stmt;
 	char		*result, *new = NULL;
-	int		rv, len, tlen = 0;
+	int		rv, tlen = 0;
 
 	if (sqlite3_open(SQ3DBFILE, &db)) {
-		printf("%% database file open failed: %s\n", sqlite3_errmsg(db));
-		return -1;
+		printf("%% database file open failed: %s\n",
+		    db ? sqlite3_errmsg(db) : strerror(ENOMEM));
+		tlen = -1;
+		goto done;
 	}
 	if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL)
 	    != SQLITE_OK) {
 		printf("%% sqlite3_prepare_v2 failed: %s (%s)\n",
 		    sqlite3_errmsg(db), sql);
-		return -1;
+		tlen = -1;
+		goto done;
 	}
 
 	while ((rv = sqlite3_step(stmt)) == SQLITE_ROW) {
 		result = (char *)sqlite3_column_text(stmt, 0);
-		len = strlen(result) + 1;
-		if ((new = malloc(len)) == NULL) {
-			printf("%% sq3simple: malloc failed\n");
+		new = strdup(result);
+		if (new == NULL) {
+			printf("%% sq3simple: strdup failed: %s\n",
+			    strerror(errno));
 			break;
 		}
-		tlen =+ len;
-		strlcpy(new, result, len);
+		tlen += strlen(new) + 1;
 		sl_add(words, new);
 	}
-	sqlite3_finalize(stmt);
-	sqlite3_close(db);
 
 	if (rv != SQLITE_DONE) {
-		printf("%% sq3simple: error: %s\n", sqlite3_errmsg(db));
-		return -1;
+		printf("%% sqlite3_step: %s\n", sqlite3_errstr(rv));
+		tlen = -1;
 	}
+
+	rv = sqlite3_finalize(stmt);
+	if (rv != SQLITE_OK) {
+		printf("%% sqlite3_finalize: %s\n", sqlite3_errstr(rv));
+		tlen = -1;
+	}
+done:
+	if (db)
+		sqlite3_close(db);
+
 	return tlen;
 }

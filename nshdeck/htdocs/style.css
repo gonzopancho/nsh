@@ -1,0 +1,1747 @@
+/* nshdeck's page: graphite and hairlines, a box's face for the ports */
+
+:root {
+	--bg: #0b0b0b;
+	--panel: #0f0f0f;
+	--side: #161616;
+	--raise: #1d1d1d;
+	--field: #080808;
+	--line: #262626;
+	--text: #f5f5f7;
+	--dim: #cbcbce;
+	--faint: #98989d;
+	--select: #ffffff12;
+	--accent: #0a84ff;
+	--soft: #193356;
+	--soft-ink: #a9cdff;
+	--on: #32d74b;
+	--warn: #ffb340;
+	--bad: #ff8f80;
+	--ring: inset 0 0 0 .5px #ffffff24, 0 .5px 1px #000;
+	--focus: 0 0 0 3px color-mix(in srgb, var(--accent) 45%, transparent);
+	--mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono",
+	    monospace;
+	--sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+	    system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
+	color-scheme: dark;
+}
+
+@media (prefers-color-scheme: light) {
+	:root {
+		--bg: #ffffff;
+		--panel: #ffffff;
+		--side: #f2f2f2;
+		--raise: #ffffff;
+		--field: #ffffff;
+		--line: #e2e2e4;
+		--text: #1d1d1f;
+		--dim: #55555a;
+		--faint: #8e8e93;
+		--select: #0000000d;
+		--soft: #dae9fe;
+		--soft-ink: #1e579f;
+		--on: #248a3d;
+		--warn: #c93400;
+		--bad: #d70015;
+		--ring: inset 0 0 0 .5px #00000029, 0 .5px 1.5px #0000001a;
+		color-scheme: light;
+	}
+}
+
+* {
+	box-sizing: border-box;
+}
+
+html, body {
+	margin: 0;
+	height: 100%;
+	background: var(--bg);
+	color: var(--text);
+	font: 13px/1.45 var(--sans);
+	font-variant-numeric: tabular-nums;
+	-webkit-font-smoothing: antialiased;
+}
+
+[hidden] {
+	display: none !important;
+}
+
+h1, h2, h3 {
+	margin: 0;
+	font-weight: 600;
+}
+
+h2 {
+	font-size: 14px;
+	color: var(--text);
+}
+
+h3 {
+	font-size: 11.5px;
+	color: var(--dim);
+}
+
+.dim {
+	color: var(--dim);
+}
+
+.mono, pre, code, input.cli, .cliline span {
+	font-family: var(--mono);
+	font-size: 12px;
+}
+
+/* controls: no borders, a hairline ring, as a native app's */
+button, input, select {
+	font: inherit;
+	color: var(--text);
+	background: var(--raise);
+	border: 0;
+	border-radius: 6px;
+	box-shadow: var(--ring);
+	padding: 4px 12px;
+	height: 28px;
+}
+
+input, select {
+	background: var(--field);
+	padding: 4px 9px;
+}
+
+input:focus, select:focus, button:focus-visible {
+	outline: none;
+	box-shadow: var(--ring), var(--focus);
+}
+
+button {
+	cursor: pointer;
+	font-weight: 500;
+}
+
+button:hover:not(:disabled) {
+	background: color-mix(in srgb, var(--text) 4%, var(--raise));
+}
+
+button:active:not(:disabled) {
+	background: color-mix(in srgb, var(--text) 9%, var(--raise));
+}
+
+button.primary {
+	background: var(--accent);
+	color: #fff;
+	box-shadow: none;
+}
+
+button.primary:hover:not(:disabled) {
+	background: color-mix(in srgb, var(--accent) 90%, #000);
+}
+
+button.primary:active:not(:disabled) {
+	background: color-mix(in srgb, var(--accent) 82%, #000);
+}
+
+input[type=checkbox] {
+	height: auto;
+	box-shadow: none;
+	accent-color: var(--accent);
+}
+
+input.narrow {
+	width: 64px;
+}
+
+input.nope {
+	box-shadow: inset 0 0 0 1px var(--bad);
+}
+
+/* the login */
+
+#login {
+	width: 320px;
+	margin: 14vh auto 0;
+	padding: 28px;
+	background: var(--raise);
+	border: 1px solid var(--line);
+	display: grid;
+	gap: 12px;
+}
+
+#login h1 {
+	font-size: 18px;
+	margin-bottom: 4px;
+}
+
+#login label {
+	display: grid;
+	gap: 4px;
+	color: var(--dim);
+	font-size: 12px;
+}
+
+.error {
+	color: var(--bad);
+	margin: 0;
+	min-height: 1em;
+}
+
+.badge {
+	width: 30px;
+	height: 30px;
+	border-radius: 6px;
+	display: grid;
+	place-items: center;
+	background: linear-gradient(160deg, #3a4048, #1c1f23);
+	border: 1px solid #454c55;
+	color: #cfd6de;
+	font: 700 11px var(--mono);
+	letter-spacing: .02em;
+}
+
+/* the frame: the rail, the strip, and a workspace */
+
+#deck {
+	display: grid;
+	grid-template-columns: 52px 1fr;
+	grid-template-rows: 44px 1fr;
+	height: 100%;
+}
+
+#rail {
+	grid-row: 1 / 3;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 4px;
+	padding: 7px 0 10px;
+	background: var(--side);
+	border-right: 1px solid var(--line);
+}
+
+#rail .badge {
+	margin-bottom: 10px;
+}
+
+#rail button {
+	width: 36px;
+	height: 36px;
+	padding: 0;
+	border: 0;
+	border-radius: 6px;
+	background: transparent;
+	box-shadow: none;
+	color: var(--dim);
+	display: grid;
+	place-items: center;
+}
+
+#rail button:hover:not(:disabled), #rail button.on {
+	color: var(--text);
+	background: var(--select);
+}
+
+#rail svg {
+	width: 18px;
+	height: 18px;
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 1.6;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+
+#rail .fill {
+	flex: 1;
+}
+
+#strip {
+	display: flex;
+	align-items: center;
+	gap: 16px;
+	padding: 0 14px;
+	background: var(--panel);
+	border-bottom: 1px solid var(--line);
+	min-width: 0;
+}
+
+#strip .host, #strip .run, #strip .cand, #strip .actions,
+#strip .health {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	min-width: 0;
+}
+
+#strip .cand {
+	flex: 1;
+}
+
+#hostname {
+	font-family: var(--mono);
+	font-size: 13px;
+}
+
+#who, #last-save {
+	font-size: 12px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/* a label: a tinted pill */
+.tag {
+	font-size: 12px;
+	font-weight: 500;
+	padding: 1px 8px;
+	border-radius: 5px;
+	background: var(--select);
+	color: var(--dim);
+	white-space: nowrap;
+}
+
+.tag.on {
+	background: var(--soft);
+	color: var(--soft-ink);
+}
+
+.tag.warn {
+	background: color-mix(in srgb, var(--warn) 14%, transparent);
+	color: var(--warn);
+}
+
+/* a tag that is a button: the strip's errors */
+button.tag {
+	height: auto;
+	box-shadow: none;
+}
+
+button.tag.warn:hover {
+	background: color-mix(in srgb, var(--warn) 24%, transparent);
+}
+
+/* what an editor's statement or setting warns of, beside it */
+.structured .tag.warn {
+	margin-left: 8px;
+}
+
+main {
+	overflow: auto;
+	min-width: 0;
+}
+
+.ws {
+	padding: 16px;
+	display: grid;
+	gap: 16px;
+	align-content: start;
+}
+
+.bar {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
+	min-height: 26px;
+}
+
+.bar h2 {
+	margin-right: 6px;
+}
+
+.inline {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex-wrap: wrap;
+	margin-left: auto;
+}
+
+.inline label {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	color: var(--dim);
+}
+
+/* a segmented control: radio buttons on a track, the one chosen raised */
+.seg {
+	display: inline-flex;
+	border: 1px solid var(--line);
+}
+
+.seg > label {
+	display: block;
+	position: relative;
+	cursor: pointer;
+	color: var(--text);
+}
+
+.seg input {
+	position: absolute;
+	opacity: 0;
+	width: 1px;
+	height: 1px;
+}
+
+.seg span {
+	display: block;
+	padding: 2px 11px;
+	line-height: 20px;
+	color: var(--dim);
+}
+
+.seg > label + label span {
+	border-left: 1px solid var(--line);
+}
+
+.seg > label:hover input:not(:checked) + span {
+	background: var(--select);
+}
+
+.seg input:checked + span {
+	color: var(--text);
+	box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.seg input:focus-visible + span {
+	box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+/* status dots; on the box's face, LEDs that glow */
+
+.led {
+	display: inline-block;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: color-mix(in srgb, var(--faint) 45%, transparent);
+	flex: none;
+}
+
+.led.on {
+	background: var(--on);
+}
+
+.led.warn {
+	background: var(--warn);
+}
+
+.chassis .led {
+	width: 7px;
+	height: 7px;
+	background: #2c2f33;
+	box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .4);
+}
+
+.chassis .led.on {
+	background: #3ee07a;
+	box-shadow: 0 0 6px #3ee07a;
+}
+
+.chassis .led.warn {
+	background: #f5b13d;
+	box-shadow: 0 0 6px #f5b13d;
+}
+
+/* the box's face: dark anodised metal, ears, a plate, the ports */
+
+.chassis {
+	display: grid;
+	grid-template-columns: 14px auto 1fr auto auto 14px;
+	align-items: stretch;
+	min-height: 120px;
+	border-radius: 5px;
+	background:
+	    linear-gradient(180deg, rgba(255, 255, 255, .06), transparent 30%),
+	    repeating-linear-gradient(90deg, rgba(255, 255, 255, .012) 0 1px,
+	    transparent 1px 3px),
+	    linear-gradient(180deg, #2b2f35, #1b1e22);
+	border: 1px solid #0a0b0d;
+	box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08),
+	    0 1px 0 rgba(255, 255, 255, .03), 0 8px 24px rgba(0, 0, 0, .35);
+	color: #c8ced6;
+	overflow: hidden;
+}
+
+.ears {
+	background:
+	    radial-gradient(circle at 50% 22%, #0b0c0e 2.5px, #3b4048 3px,
+	    transparent 4px),
+	    radial-gradient(circle at 50% 78%, #0b0c0e 2.5px, #3b4048 3px,
+	    transparent 4px),
+	    linear-gradient(90deg, #24282d, #30353b);
+	border-right: 1px solid #0d0e10;
+}
+
+.ears:last-child {
+	border-right: 0;
+	border-left: 1px solid #0d0e10;
+}
+
+.plate {
+	display: flex;
+	flex-direction: column;
+	justify-content: center;
+	gap: 3px;
+	padding: 0 22px;
+	border-right: 1px solid rgba(0, 0, 0, .5);
+	box-shadow: 1px 0 0 rgba(255, 255, 255, .04);
+	min-width: 168px;
+}
+
+.plate .brand {
+	font: 800 15px var(--sans);
+	letter-spacing: .14em;
+	text-transform: uppercase;
+	color: #e9edf2;
+}
+
+.plate .model {
+	font: 12px var(--mono);
+	color: #aab3bd;
+}
+
+.plate .serial {
+	font: 10px var(--mono);
+	color: #6c747e;
+	max-width: 220px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.ports {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	align-content: center;
+	gap: 14px 26px;
+	padding: 14px 22px;
+}
+
+.block {
+	display: grid;
+	gap: 6px;
+}
+
+.block .row {
+	display: flex;
+	gap: 6px;
+}
+
+/* the block's driver, silkscreened under a bracket */
+.block .silk {
+	font: 600 9px var(--sans);
+	letter-spacing: .16em;
+	text-transform: uppercase;
+	color: #7c858f;
+	border-top: 1px solid #4a5059;
+	padding-top: 3px;
+	text-align: center;
+}
+
+.status {
+	display: grid;
+	grid-template-columns: repeat(2, auto);
+	align-content: center;
+	gap: 9px 16px;
+	padding: 0 22px;
+	border-left: 1px solid rgba(0, 0, 0, .5);
+	box-shadow: inset 1px 0 0 rgba(255, 255, 255, .04);
+	font: 600 9px var(--sans);
+	letter-spacing: .14em;
+	color: #7c858f;
+}
+
+.status span {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.led.blink {
+	animation: blink 1s steps(2, start) infinite;
+}
+
+@keyframes blink {
+	to {
+		visibility: hidden;
+	}
+}
+
+.port {
+	all: unset;
+	cursor: pointer;
+	display: grid;
+	justify-items: center;
+	gap: 3px;
+	width: 48px;
+}
+
+/*
+ * an RJ45 cage: a dark recess, its latch notch at the bottom, and in its
+ * top corners its lights, link on the left and activity on the right
+ */
+.port .jack {
+	position: relative;
+	width: 42px;
+	height: 32px;
+	background: linear-gradient(180deg, #050607, #15171a);
+	border: 1px solid #000;
+	border-radius: 2px;
+	box-shadow: inset 0 2px 4px rgba(0, 0, 0, .9),
+	    0 1px 0 rgba(255, 255, 255, .07);
+	clip-path: polygon(0 0, 100% 0, 100% 78%, 68% 78%, 68% 100%,
+	    32% 100%, 32% 78%, 0 78%);
+}
+
+.port .jack .led {
+	position: absolute;
+	top: 3px;
+	width: 8px;
+	height: 4px;
+	border-radius: 1px;
+}
+
+.port .jack .link {
+	left: 3px;
+}
+
+.port .jack .act {
+	right: 3px;
+}
+
+.port.on .jack .link, .port .jack .act.on {
+	background: #3ee07a;
+	box-shadow: 0 0 6px #3ee07a;
+}
+
+.port.warn .jack .link {
+	background: #f5b13d;
+	box-shadow: 0 0 6px #f5b13d;
+}
+
+/* traffic: a flicker, as a port's light does */
+.port .jack .act.on {
+	animation: traffic 1.3s steps(1) infinite;
+}
+
+@keyframes traffic {
+	12% { opacity: .2; }
+	19% { opacity: 1; }
+	41% { opacity: .15; }
+	47% { opacity: 1; }
+	66% { opacity: .3; }
+	74% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.port .jack .act.on {
+		animation: none;
+	}
+}
+
+.port.off .jack {
+	opacity: .65;
+}
+
+.port:hover .jack, .port:focus-visible .jack {
+	box-shadow: inset 0 2px 4px rgba(0, 0, 0, .9),
+	    0 0 0 1px var(--accent);
+}
+
+.port .label {
+	font: 10px var(--mono);
+	color: #b9c1ca;
+}
+
+.port[aria-expanded=true] .label {
+	color: #fff;
+	text-decoration: underline;
+}
+
+.port .rate {
+	font: 9px var(--mono);
+	color: #6c747e;
+	min-height: 11px;
+}
+
+/* the readout: a display set in the box's face, its glass lit */
+.readout {
+	align-self: center;
+	display: grid;
+	grid-template-columns: auto auto;
+	gap: 1px 16px;
+	margin: 0 20px;
+	padding: 9px 14px;
+	border-radius: 4px;
+	border: 1px solid #000;
+	background:
+	    repeating-linear-gradient(0deg, rgba(255, 255, 255, .025) 0 1px,
+	    transparent 1px 3px),
+	    radial-gradient(ellipse at 50% 0%, #0d1714, #040605 70%);
+	box-shadow: inset 0 2px 10px rgba(0, 0, 0, .9),
+	    0 1px 0 rgba(255, 255, 255, .07);
+	font: 11.5px/1.55 var(--mono);
+	color: #86f3d6;
+	text-shadow: 0 0 6px rgba(80, 240, 200, .45);
+	white-space: nowrap;
+}
+
+.readout dt {
+	opacity: .55;
+	letter-spacing: .08em;
+	text-transform: uppercase;
+}
+
+.readout dd {
+	margin: 0;
+}
+
+/* the logical interfaces, grouped */
+
+/* a port's tray, below the front panel (relations.js) */
+.tray {
+	display: grid;
+	gap: 2px;
+	margin-top: -1px;
+	padding: 8px 12px 10px;
+	background: var(--panel);
+	border: 1px solid var(--line);
+}
+
+.tray[hidden] {
+	display: none;
+}
+
+.tray h3 {
+	font: 600 13px var(--mono);
+}
+
+.tray h4 {
+	margin: 6px 0 0;
+	font-size: 11.5px;
+	font-weight: 500;
+	color: var(--dim);
+}
+
+/* a relation row: the relation, the other end and its sources */
+.rels {
+	padding: 4px 10px 8px;
+}
+
+.rel {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 2px 10px;
+	padding: 3px 0;
+	font-size: 12.5px;
+}
+
+.rel code {
+	font: 11.5px var(--mono);
+	color: var(--dim);
+}
+
+.rel .said {
+	margin-left: auto;
+	font-size: 11.5px;
+	color: var(--faint);
+}
+
+button.goto {
+	height: auto;
+	padding: 0;
+	font: 12px var(--mono);
+	color: var(--accent);
+	background: none;
+	box-shadow: none;
+}
+
+button.goto:hover:not(:disabled) {
+	background: none;
+	text-decoration: underline;
+}
+
+.crumb {
+	margin: 0;
+	font: 12px var(--mono);
+	color: var(--dim);
+}
+
+.nothing {
+	margin: 0;
+	padding: 3px 0;
+	font-size: 12px;
+	color: var(--faint);
+}
+
+.logical {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+	gap: 12px;
+	align-items: start;
+}
+
+.group {
+	background: var(--panel);
+	border: 1px solid var(--line);
+	padding: 6px;
+}
+
+.group h3 {
+	display: flex;
+	gap: 7px;
+	padding: 5px 8px 7px;
+	font-size: 12.5px;
+	color: var(--text);
+}
+
+.group h3 .count {
+	color: var(--faint);
+	font-weight: 500;
+}
+
+.lif {
+	all: unset;
+	cursor: pointer;
+	display: grid;
+	grid-template-columns: 10px 70px 1fr auto;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	box-sizing: border-box;
+	padding: 6px 8px;
+	border-radius: 6px;
+}
+
+.lif:hover, .lif:focus-visible {
+	background: var(--select);
+}
+
+.lif b {
+	font: 600 12px var(--mono);
+}
+
+.lif .rel, .lif .addr {
+	color: var(--dim);
+	font: 11px var(--mono);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/* tables: dense rows, thin rules */
+
+table.grid {
+	width: 100%;
+	border-collapse: collapse;
+	background: var(--panel);
+	border: 1px solid var(--line);
+}
+
+.grid th {
+	text-align: left;
+	font-size: 11.5px;
+	font-weight: 600;
+	color: var(--dim);
+	padding: 8px 10px 6px;
+	border-bottom: 1px solid var(--line);
+	white-space: nowrap;
+}
+
+.grid td {
+	padding: 5px 10px;
+	border-bottom: 1px solid var(--line);
+	vertical-align: middle;
+	font-size: 12px;
+	line-height: 18px;
+}
+
+.grid tr:last-child td {
+	border-bottom: 0;
+}
+
+.grid td.mono {
+	font: 12px var(--mono);
+}
+
+.grid td.num {
+	font-family: var(--mono);
+	text-align: right;
+}
+
+.grid td.descr {
+	width: 100%;
+	min-width: 140px;
+}
+
+.pick td:not(.descr) {
+	white-space: nowrap;
+}
+
+.grid td.type {
+	max-width: 110px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--dim);
+}
+
+/* Network: the interfaces, and the inspector of one */
+
+.netsplit {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) minmax(360px, 460px);
+	gap: 16px;
+	align-items: start;
+}
+
+#inspector, .dinsp {
+	position: sticky;
+	top: 0;
+	max-height: calc(100vh - 80px);
+	overflow: auto;
+	gap: 10px;
+}
+
+.ihead {
+	display: flex;
+	align-items: center;
+	gap: 9px;
+	flex-wrap: wrap;
+}
+
+.ihead .iname {
+	font: 600 16px var(--mono);
+	letter-spacing: 0;
+	text-transform: none;
+	color: var(--text);
+}
+
+#inspector .from, .dinsp .from {
+	margin: 0;
+	font-size: 12px;
+}
+
+#inspector > label.dim {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 12px;
+}
+
+.igroup {
+	background: var(--panel);
+	border: 1px solid var(--line);
+}
+
+.igroup summary {
+	display: flex;
+	gap: 10px;
+	align-items: baseline;
+	padding: 7px 10px;
+	cursor: pointer;
+	font-weight: 600;
+	font-size: 12px;
+	list-style-position: inside;
+}
+
+.igroup summary .count {
+	font: 400 11px var(--mono);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.igroup[open] summary {
+	border-bottom: 1px solid var(--line);
+}
+
+.field {
+	display: grid;
+	grid-template-columns: 128px minmax(0, 1fr);
+	gap: 3px 10px;
+	align-items: center;
+	padding: 7px 10px;
+	border-bottom: 1px solid var(--line);
+	border-left: 2px solid transparent;
+}
+
+.field:last-child {
+	border-bottom: 0;
+}
+
+.field.edited {
+	border-left-color: var(--warn);
+	background: color-mix(in srgb, var(--warn) 6%, transparent);
+}
+
+.field label {
+	color: var(--dim);
+	font-size: 12px;
+}
+
+.field input:not([type=checkbox]), .field select {
+	width: 100%;
+	min-width: 0;
+}
+
+.field input[type=checkbox] {
+	justify-self: start;
+}
+
+.field .info {
+	grid-column: 2;
+	display: flex;
+	gap: 8px;
+	align-items: baseline;
+	font-size: 12px;
+	line-height: 1.4;
+	color: var(--dim);
+}
+
+.field .info code {
+	font: 11.5px var(--mono);
+	color: var(--text);
+}
+
+/* a field's ? button and its definition (registry.js) */
+button.what {
+	flex: none;
+	margin-left: auto;
+	width: 18px;
+	height: 18px;
+	padding: 0;
+	font: 600 11px var(--mono);
+	color: var(--dim);
+	background: none;
+	border: 1px solid var(--line);
+	border-radius: 0;
+	box-shadow: none;
+}
+
+button.what[aria-expanded=true] {
+	color: var(--text);
+	border-color: var(--accent);
+}
+
+.field .def {
+	grid-column: 1 / -1;
+	padding: 8px 10px;
+	font-size: 12px;
+	line-height: 1.45;
+	background: var(--side);
+	border-left: 1px solid var(--accent);
+}
+
+.field .def p {
+	margin: 0 0 6px;
+}
+
+.field .def dl {
+	display: grid;
+	grid-template-columns: max-content minmax(0, 1fr);
+	gap: 2px 12px;
+	margin: 0;
+}
+
+.field .def dt {
+	color: var(--dim);
+}
+
+.field .def dd {
+	margin: 0;
+	overflow-wrap: anywhere;
+}
+
+/* a field's input with a button beside it */
+.addline {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+
+/* a choice of what to add, wide enough to read */
+.addline select {
+	min-width: 9em;
+}
+
+.rows > button {
+	align-self: start;
+}
+
+.chips, .rows {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	align-items: center;
+}
+
+.rows {
+	flex-direction: column;
+	align-items: stretch;
+}
+
+.chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 1px 2px 1px 8px;
+	border-radius: 5px;
+	background: var(--select);
+	font-size: 12px;
+}
+
+.rows .chip {
+	justify-content: space-between;
+}
+
+.chip button {
+	height: 18px;
+	padding: 0 5px;
+	background: transparent;
+	box-shadow: none;
+	color: var(--faint);
+}
+
+.chip button:hover {
+	color: var(--bad);
+}
+
+.chips input.add {
+	flex: 1;
+	min-width: 90px;
+}
+
+pre.stanza {
+	max-height: 200px;
+	min-height: 0;
+}
+
+.result {
+	font: 11px var(--mono);
+	padding: 2px 0;
+}
+
+.result.ok {
+	color: var(--on);
+}
+
+.result.bad {
+	color: var(--bad);
+}
+
+#inspector .bar, .dinsp > .bar {
+	justify-content: flex-end;
+}
+
+/* a daemon's rules, as text */
+.daemons {
+	display: grid;
+	gap: 10px;
+}
+
+textarea.rules {
+	display: block;
+	width: calc(100% - 20px);
+	min-height: 260px;
+	margin: 10px;
+	padding: 8px 10px;
+	resize: vertical;
+	font: 12px/1.45 var(--mono);
+	color: var(--text);
+	background: var(--field);
+	border: 1px solid var(--line);
+	white-space: pre;
+	overflow: auto;
+}
+
+textarea.rules:focus {
+	outline: none;
+	border-color: var(--accent);
+}
+
+textarea.rules.edited {
+	box-shadow: inset 2px 0 0 var(--warn);
+}
+
+/* the pf and bgpd editors under the daemons (editors.js) */
+.dmain {
+	display: grid;
+	gap: 16px;
+	align-content: start;
+	min-width: 0;
+}
+
+.structured {
+	display: grid;
+	gap: 10px;
+	min-width: 0;
+}
+
+.structured:empty {
+	display: none;
+}
+
+.structured .bar .help {
+	flex: 1 1 40ch;
+}
+
+/* a rule's number, and the kind of a row that is not a rule */
+.srules td.num {
+	width: 1%;
+	color: var(--faint);
+}
+
+.srules td.kind {
+	font: 11.5px var(--mono);
+	color: var(--faint);
+}
+
+.srules td.cmt {
+	font: 12px var(--mono);
+	color: var(--faint);
+}
+
+/* an anchor's rules, listed under it; they cannot be selected */
+.srules tr.inner td {
+	color: var(--dim);
+	cursor: default;
+}
+
+.pick tr.inner:hover td {
+	background: none;
+}
+
+.srules tr.inner td:nth-child(2) {
+	padding-left: 26px;
+}
+
+/* a rule's or a filter's action */
+.act {
+	font: 600 12px var(--mono);
+}
+
+.act-pass {
+	color: var(--on);
+}
+
+.act-block {
+	color: var(--bad);
+}
+
+.act-match {
+	color: var(--soft-ink);
+}
+
+/* the selected statement's form, in its own row below it */
+.pick tr.sform td, .pick tr.sform:hover td {
+	padding: 12px;
+	white-space: normal;
+	cursor: default;
+	background: var(--side);
+}
+
+.pick tr.sform td:first-child {
+	box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.sform h3, .speer h3, .flow h3 {
+	margin: 0 0 6px;
+}
+
+.sform h3 {
+	margin-top: 12px;
+}
+
+.sform > td > .bar {
+	margin-top: 10px;
+	justify-content: flex-end;
+}
+
+/* a form's fields in hairline cells, two per row where they fit */
+.sfields {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr));
+	background: var(--panel);
+	border-top: 1px solid var(--line);
+	border-left: 1px solid var(--line);
+}
+
+.sfields > .field, .sfields > .field:last-child {
+	border-bottom: 1px solid var(--line);
+	border-right: 1px solid var(--line);
+}
+
+.sfields > .help {
+	padding: 10px;
+	border-bottom: 1px solid var(--line);
+	border-right: 1px solid var(--line);
+}
+
+.field textarea.lines {
+	width: 100%;
+	min-width: 0;
+	padding: 4px 9px;
+	resize: vertical;
+	color: var(--text);
+	background: var(--field);
+	border: 1px solid var(--line);
+}
+
+.field textarea.lines:focus {
+	outline: none;
+	border-color: var(--accent);
+}
+
+/* a peer's form: its session, and its inbound and outbound filters */
+.speer {
+	display: grid;
+	gap: 12px;
+	padding: 12px;
+	background: var(--panel);
+	border: 1px solid var(--line);
+}
+
+.speer > .bar {
+	justify-content: flex-end;
+}
+
+.flows {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
+	gap: 10px;
+}
+
+.flow {
+	display: grid;
+	gap: 6px;
+	align-content: start;
+	padding: 10px;
+	border: 1px solid var(--line);
+}
+
+.flow ol {
+	margin: 0;
+	padding-left: 24px;
+	font: 12px var(--mono);
+}
+
+.flow li + li {
+	margin-top: 3px;
+}
+
+.flow > .empty {
+	display: block;
+}
+
+.igroup > .help, .igroup > .bar, .igroup > .cliline, .igroup > pre.term,
+.igroup > pre.cmd, .igroup > dl.args {
+	margin: 0 10px 10px;
+}
+
+/* a save in a daemon's history, opened for its changes */
+details.dsave {
+	margin: 0 10px 6px;
+	border-top: 1px solid var(--line);
+}
+
+details.dsave summary {
+	display: flex;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 4px 0;
+	font-size: 12px;
+	cursor: pointer;
+}
+
+details.dsave pre.term {
+	margin: 0 0 6px;
+}
+
+/* the command nsh starts a daemon with, and what its arguments do */
+pre.cmd {
+	padding: 6px 8px;
+	font-family: var(--mono);
+	font-size: 12px;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	background: var(--side);
+	border: 1px solid var(--line);
+}
+
+dl.args, dl.observed {
+	display: grid;
+	grid-template-columns: max-content minmax(0, 1fr);
+	gap: 2px 12px;
+	font-size: 12px;
+}
+
+dl.args dd, dl.observed dd {
+	margin: 0;
+}
+
+/* what bgpctl observed of a peer, apart from its settings */
+dl.observed {
+	margin: 0 0 10px;
+}
+
+dl.observed dt {
+	color: var(--dim);
+}
+
+button:disabled {
+	opacity: .45;
+	cursor: default;
+}
+
+/* a table whose rows are chosen */
+.pick td {
+	cursor: pointer;
+}
+
+.pick tr:hover td {
+	background: var(--raise);
+}
+
+.pick tr.sel td {
+	background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.pick tr.sel td:first-child {
+	box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* shows, consoles and transcripts */
+
+.shows, .panel {
+	display: grid;
+	gap: 8px;
+	align-content: start;
+	min-width: 0;
+}
+
+.shows .out {
+	display: grid;
+	gap: 8px;
+}
+
+button.preset {
+	height: 22px;
+	padding: 0 9px;
+	font: 11.5px var(--mono);
+}
+
+.cliline {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	background: var(--field);
+	box-shadow: var(--ring);
+	border-radius: 6px;
+	padding: 0 0 0 9px;
+}
+
+.cliline:focus-within {
+	box-shadow: var(--ring), var(--focus);
+}
+
+.cliline span {
+	color: var(--on);
+	white-space: nowrap;
+}
+
+.cliline input {
+	flex: 1;
+	border: 0;
+	background: transparent;
+	box-shadow: none;
+	min-width: 0;
+}
+
+.cliline input.narrow {
+	flex: none;
+	border-left: 1px solid var(--line);
+	border-radius: 0;
+}
+
+.cliline button {
+	box-shadow: none;
+	border-left: 1px solid var(--line);
+	border-radius: 0 6px 6px 0;
+}
+
+pre.term {
+	margin: 0;
+	padding: 10px 12px;
+	background: var(--field);
+	border: 1px solid var(--line);
+	max-height: 340px;
+	min-height: 60px;
+	overflow: auto;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+/* what a part of the page is for, and what it shows when it has nothing */
+.help {
+	margin: 0;
+	max-width: 90ch;
+	font-size: 12px;
+	color: var(--dim);
+}
+
+.help code, .empty code {
+	color: var(--text);
+}
+
+.empty {
+	display: none;
+	margin: 0;
+	padding: 10px 12px;
+	border: 1px solid var(--line);
+	color: var(--dim);
+}
+
+pre.term:empty, ul:empty, table.grid:empty {
+	display: none;
+}
+
+:empty + .empty {
+	display: block;
+}
+
+pre.term.tall {
+	max-height: 520px;
+}
+
+.bar .fill {
+	flex: 1;
+}
+
+.topic {
+	display: grid;
+	gap: 16px;
+}
+
+/* a diff: lines added green, taken away red, each on its own tint */
+pre.diff span {
+	display: block;
+	margin: 0 -12px;
+	padding: 0 12px;
+}
+
+pre.diff .add {
+	color: var(--on);
+	background: color-mix(in srgb, var(--on) 10%, transparent);
+}
+
+pre.diff .del {
+	color: var(--bad);
+	background: color-mix(in srgb, var(--bad) 10%, transparent);
+}
+
+pre.diff .hdr, pre.diff .msg {
+	color: var(--dim);
+}
+
+/* a row's arrow, which opens what it changed under it */
+button.twisty {
+	width: 20px;
+	height: 20px;
+	padding: 0;
+	background: none;
+	box-shadow: none;
+	color: var(--dim);
+}
+
+button.twisty::before {
+	content: "";
+	display: inline-block;
+	width: 6px;
+	height: 6px;
+	border: solid currentColor;
+	border-width: 0 1.5px 1.5px 0;
+	transform: rotate(-45deg);
+	transition: transform .15s;
+}
+
+button.twisty[aria-expanded=true]::before {
+	transform: rotate(45deg);
+}
+
+.pick tr.changes td, .pick tr.changes:hover td {
+	padding: 0 10px 10px 36px;
+	background: none;
+	cursor: default;
+}
+
+#op-kinds td.mono {
+	white-space: nowrap;
+}
+
+.split {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+	gap: 16px;
+}
+
+/* the terminal: a screen, dark whatever the page's colors are */
+#ws-terminal {
+	height: 100%;
+	grid-template-rows: auto 1fr;
+	align-content: stretch;
+}
+
+#ws-terminal .fill {
+	flex: 1;
+}
+
+#term {
+	min-height: 320px;
+	padding: 8px;
+	overflow: hidden;
+	background: #0b0d10;
+	border: 1px solid var(--line);
+}
+
+.panel {
+	background: var(--panel);
+	border: 1px solid var(--line);
+	padding: 12px;
+}
+
+#notices {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	max-height: 140px;
+	overflow: auto;
+	font: 11px var(--mono);
+	color: var(--dim);
+}
+
+#notices li {
+	padding: 2px 0;
+	border-bottom: 1px solid var(--line);
+}
+
+/* the choices Tab and ? list */
+
+#choices {
+	position: absolute;
+	z-index: 10;
+	max-height: 300px;
+	max-width: 640px;
+	overflow: auto;
+	background: var(--raise);
+	border: 1px solid var(--line);
+	padding: 4px;
+}
+
+.choice {
+	display: grid;
+	grid-template-columns: minmax(90px, auto) 1fr;
+	gap: 14px;
+	padding: 3px 8px;
+	cursor: pointer;
+	font-size: 12px;
+}
+
+.choice .w {
+	font-family: var(--mono);
+	color: var(--text);
+}
+
+.choice .h {
+	color: var(--dim);
+}
+
+.choice:hover, .choice.sel {
+	background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.choice.hint {
+	cursor: default;
+}
+
+.choice.hint .w {
+	color: var(--dim);
+	font-style: italic;
+}
+
+.choice.hint:hover {
+	background: none;
+}
+
+/* the commit dialog */
+
+dialog {
+	background: var(--raise);
+	color: var(--text);
+	border: 1px solid var(--line);
+	padding: 20px;
+	width: 400px;
+}
+
+dialog::backdrop {
+	background: rgba(0, 0, 0, .45);
+}
+
+dialog form {
+	display: grid;
+	gap: 12px;
+}
+
+dialog label {
+	display: grid;
+	gap: 4px;
+	color: var(--dim);
+}
+
+dialog label.row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+dialog p {
+	margin: 0;
+	font-size: 12px;
+}
+
+dialog .actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+}
+
+@media (max-width: 1100px) {
+	.netsplit {
+		grid-template-columns: minmax(0, 1fr);
+	}
+	#inspector, .dinsp {
+		position: static;
+		max-height: none;
+	}
+}
+
+@media (max-width: 720px) {
+	#deck {
+		grid-template-columns: 44px 1fr;
+	}
+	#strip .actions button:not(.primary), #who, #last-save {
+		display: none;
+	}
+	.chassis {
+		grid-template-columns: 10px 1fr 10px;
+	}
+	.plate, .status {
+		display: none;
+	}
+	.readout {
+		grid-area: 2 / 2;
+		justify-self: start;
+		margin: 0 0 14px 22px;
+	}
+}

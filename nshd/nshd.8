@@ -1,0 +1,417 @@
+.\" Copyright (c) 2026 Chris Cappuccio <chris@nmedia.net>
+.\"
+.\" Permission to use, copy, modify, and distribute this software for any
+.\" purpose with or without fee is hereby granted, provided that the above
+.\" copyright notice and this permission notice appear in all copies.
+.\"
+.\" THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+.\" WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+.\" MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+.\" ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+.\" WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+.\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+.\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+.\"
+.Dd $Mdocdate$
+.Dt NSHD 8
+.Os
+.Sh NAME
+.Nm nshd
+.Nd network configuration daemon
+.Sh SYNOPSIS
+.Nm
+.Op Fl bdv
+.Sh DESCRIPTION
+.Nm
+reads the system's configuration for
+.Xr nsh 8 ,
+which asks it over a socket.
+It is privilege separated.
+The parent process, as root, binds the sockets and starts the children,
+each except system as a user of its own, so that none may signal or reach
+the files of a child of another role:
+.Bl -tag -width "frontend"
+.It show
+Four of them, each as _nshshow in a
+.Xr chroot 2 ,
+answer the read-only socket, with what anyone may see: interfaces,
+routes, the ARP and neighbor tables, VLANs, bridges, kernel
+statistics, the IPsec flows, the version, who is logged in and the
+hostname, as facts the client renders.
+A long answer holds up only the one show that makes it, and is made
+only as the client reads it.
+A show has no path to the others.
+It is not
+.Xr pledge 2 Ns d ,
+as no promise has the interface ioctls it asks.
+Each opens
+.Pa /var/run/utmp
+before its
+.Xr chroot 2 .
+.It frontend
+Runs as _nshfront in a
+.Xr chroot 2
+and answers the read-write socket.
+Each client is a session, which asks one thing at a time.
+frontend passes system each client's socket as the client comes, and
+tells system, before config, of each request that may begin a commit,
+and of each operation, and when it is answered;
+a client of _nshweb's uid is the web configurator's session, which
+alone may log in, as a user, with that user's password, and ask for
+the user's terminal.
+.It config
+Runs as _nshconf in a
+.Xr chroot 2 ,
+holds the sessions, and asks system for what they need.
+A session has the permissions of its user's login class, which config
+asks system for at the session's hello, by the uid frontend gives (see
+.Cm login class
+in
+.Xr nsh 8 ) .
+config refuses what they do not allow: a show without view, an
+operation without operate, and configure, a commit, a rollback, a
+load or a daemon's rules without configure.
+exec, the programs nsh runs, is nsh's to check; config only says
+whether the class has it.
+.Cm configure
+and
+.Cm configure exclusive
+need admin too, as their candidate is every session's in them, and a
+session without admin sees no password hash of a
+.Cm login user
+line.
+The web configurator's session has no permissions until it logs in;
+then it is the session of the user it logged in as, by that user's
+uid, with the permissions of the user's class.
+A session in
+.Cm configure private
+has a candidate of its own; the sessions in
+.Cm configure
+share one, and each sees what the others change in it.
+config edits a candidate a line at a time, with nsh's own commands, as
+they run in
+.Cm configure private :
+the running configuration, and what they read of the kernel, are those
+of a snapshot that system makes when a session enters configure or shows
+its candidate.
+.Cm configure exclusive
+is
+.Cm configure
+while no other session changes the shared candidate or commits any; it
+is refused while another session has it, or while another user's
+changes to the shared candidate are not committed, and leaving it, or
+its session going, discards what it did not commit.
+While a commit of the shared candidate runs, no other session changes
+it.
+A commit is one at a time, across all the sessions:
+config plans it from a snapshot and checks it, has system test the
+daemons' rules it changes, and has system record it, run its script,
+and, if a snapshot after reads as the candidate, save what runs; if
+not, system runs the script back.
+.Cm commit check
+stops after the tests.
+.Cm commit confirmed
+runs its script even if the candidate is what runs, and, if a snapshot
+after reads as the candidate, keeps what runs without saving it until
+its deadline; a commit that saves confirms it.
+A commit outside configure has system save what runs, and nothing else.
+In
+.Cm configure terminal ,
+each line that changes the session's candidate, made from what runs
+when the line comes, is committed, and not saved; commit there saves
+what runs.
+config takes the configuration that
+.Ic nsh Fl c
+sends, a part at a time, as a candidate of its own in place of what
+runs, and commits it, all of it or none.
+A session in configure, but not
+.Cm configure terminal ,
+may set a daemon's rules in its candidate, in a routing table, a part
+at a time and up to 1 MB, as the daemon's
+.Cm edit
+sets them; or ask for them.
+.Cm rollback Ar N
+takes configuration
+.Ar N
+from system.
+A commit whose session goes runs to its end.
+A session with view may watch commits, and interfaces and routes, and
+config then sends it notices, unasked, between the answers to what it asks: a
+commit saved, a commit confirmed with its minutes, a line of
+.Cm configure terminal
+committed, a commit not confirmed taken back at its deadline, as
+system says, and
+.Cm configure exclusive
+taken or left, each with the user's uid; and interfaces or addresses
+changed, and the routing tables whose routes changed, from a
+.Xr route 4
+socket that the parent opens for it, said once a second at most.
+It may watch logs too, which system follows, and config sends the
+session what system reads of each as notices, until the session's
+watch drops it.
+A client that completes lines itself, as Tab does in
+.Xr nsh 8 ,
+may ask for nsh's command tables and for the names of interfaces,
+groups, bridges and routing tables, if its session has view.
+The names come from config's last snapshot; if there is none yet,
+config takes one first.
+config is
+.Xr pledge 2 Ns d
+to stdio: it reads no kernel, opens no file and runs no program of its
+own, and refuses a line that would.
+.It system
+Runs as root, and reads the configuration from the kernel, the
+daemons and the saved configuration, which it alone writes, in
+.Pa /var/db/nsh ,
+where
+.Xr nsh 8 Ns 's
+own
+.Pa /etc/nshrc
+is not; nsh's
+.Cm show startup-config
+asks for it.
+It answers config and no one else, and begins a commit only for a
+request that frontend told it of and that is not answered, or was not
+when its session went.
+The uid it records, and whether a session is the web configurator's,
+it reads itself, with
+.Xr getpeereid 2 ,
+from the socket of the session's client, and it takes a request only
+while that client is connected, so a frontend taken over cannot say
+who a client is.
+It keeps a client's socket only while enough descriptors stay free for
+its own work: commits and the streams it runs.
+When it cannot keep a socket, it refuses that client's requests.
+system checks the permissions of that uid's login class itself, as
+config does: an operation needs operate, and a commit, its test and a
+save need configure.
+It checks a login of the web configurator's itself too, the password
+with
+.Xr auth_usercheck 3
+and the account with
+.Xr auth_approval 3 ,
+for a user that a
+.Cm login user
+line names, and never root; the session then acts as that user, whose
+uid its commits record, until it goes.
+system starts such a session's terminal as
+.Xr login 1
+starts a shell: it opens a pty, and runs
+.Xr nsh 8
+on it as the user, with the user's groups and
+.Xr login.conf 5
+settings, in the user's home directory and a clean environment.
+The pty goes back to the session, through config and frontend, and
+nsh ends when the session closes it.
+system runs an operation a session asks, such as
+.Cm flush routes
+or a daemon's action, as root, if nsh's code names it one, in a child
+of its own, which it streams as a show's.
+A child of its own prints what a daemon's control program prints for a
+show, and the DHCP leases, and system streams it only as fast as the
+client reads it; the child, and its process group, are killed
+if the client goes first.
+The program is the one nsh's tables name for the show, never one a
+client names, and the child runs it as _nshcheck, unless system names
+it as one that keeps root: a daemon's control program, as its control
+socket,
+.Pa /dev/pf
+and PF_KEY are root's.
+The child that prints the leases opens them, then becomes _nshcheck.
+A log a session watches is followed the same way: the child opens
+.Pa /var/log/daemon ,
+.Pa /var/log/messages
+or
+.Pa /var/log/authlog
+as root, then becomes _nshcheck, prints its last lines and each line
+as it comes, and a new child follows the new file once
+.Xr newsyslog 8
+turns it over; pf's log is
+.Xr tcpdump 8
+on
+.Xr pflog 4 ,
+which keeps root to open it and gives it up itself.
+system checks that the session's class has view, and admin for
+authlog, as it checks an operation.
+A commit's script, its save, and each test of a daemon's rules run in a
+child of system's; one that runs past its time, 900 seconds for a
+script, 300 for a save and 120 for a test, is sent SIGTERM, with its
+process group, and SIGKILL 10 seconds later, 5 for a test, and fails.
+A script and a save run as root.
+config makes a commit's script into edits, and system runs the edits
+and never the script's text.
+Each edit names one of the commands a configuration has, by its place
+among them, with its words: a statement, an interface's or a bridge's
+line, the end of a block, a daemon's rules, the state a daemon is left
+in, or what follows its rules.
+A line of any other command, such as
+.Ic reboot ,
+.Ic ping
+or
+.Ic \&! ,
+or of a daemon's operation, such as smtp's
+.Cm remove ,
+has no edit: config refuses the commit and says each such line, and
+the boot leaves each out and says so.
+system checks every edit before it runs any, and runs none if one names
+no such command, or one where it does not belong.
+A commit of a session without admin may not change what needs admin
+(see
+.Cm login class
+in
+.Xr nsh 8 ) ,
+unless the same line ran before the commit; the script fails at such a
+change, and the commit goes back.
+A test of a daemon's rules for such a session is refused the same
+lines, judged against the running configuration.
+A test runs as _nshcheck, with its rules in a directory of their own,
+both _nshcheck's, except for relayd's, ldapd's, npppd's, sasyncd's and
+sshd's, which read keys or secrets their rules name, and keep root.
+While one runs, other requests wait, but streams go on.
+system keeps a record of a commit that has begun, which a commit takes
+away when it saves or goes back; one that does not leaves it, and the
+next commit says what it left.
+While the record says a commit's changes were not saved, a commit
+that neither saves what runs nor goes back to before it is refused.
+A commit confirmed makes a record of a commit not confirmed too, which
+goes back to what ran before the first commit not confirmed.
+If the commit goes back, so does that record, to how it was before it.
+A commit that saves takes that record away before it saves.
+Its deadline is its minutes from when it is kept.
+Past its deadline, system takes the commit back, once no commit it
+began and no script, save or test is in the way: it demotes carp by
+128, runs a script back, and promotes carp again once what runs reads
+as it was.
+A script back that fails is run again 5 seconds later, three times at
+most; then the record says it failed, and carp stays demoted until a
+commit saves.
+When
+.Nm
+starts, system finds any commit not confirmed that an earlier run
+left, and takes it back once its deadline has passed.
+A commit is refused if what runs is not what it was planned from.
+system is a session of its own: when
+.Nm
+ends, the parent kills every process left in that session, and every
+process of _nshcheck's.
+.It archive
+Runs as _nsharc in a
+.Xr chroot 2 ,
+and keeps the shared candidate, and who changed it, for config, in
+.Pa /var/db/nsh/archive ,
+which it opens before it enters the
+.Xr chroot 2 .
+config sends it each time it changes, and answers the session that
+changed it once archive has kept it, whole and synced to disk, or said
+it did not.
+When
+.Nm
+starts, config takes what archive kept before any session enters
+.Cm configure .
+.El
+.Pp
+frontend and config, config and system, config and archive, and
+frontend and system each talk on a pipe of their own, which the parent
+makes before the children start, so each knows who sent what it reads.
+Each child also has a pipe to the parent, which tells it when to
+start.
+The only message the parent accepts from a child is config's word that
+the boot is done.
+.Pp
+If any child exits, or sends the parent or a peer something it may
+not,
+.Nm
+ends: the child's peers see their pipes close and exit, and the parent
+kills the rest with
+.Dv SIGKILL .
+No child is started again.
+If
+.Nm
+ends while a commit not confirmed waits, nothing takes the commit back
+until
+.Nm
+is started again.
+.Pp
+With
+.Fl b ,
+as rc starts it,
+.Nm
+boots: before frontend and the shows take clients, config has system
+make the running configuration the saved one, all of it that takes, as
+.Xr nsh 8
+.Fl i
+does; what check finds is said, and a daemon's rules are tested, but
+neither keeps it from running.
+What config and system print for it is logged.
+.Nm
+returns once the boot is done, with 0 if what runs is then the saved
+configuration, else 1.
+The first time, with no saved configuration, system takes
+.Pa /etc/nshrc
+as it.
+system keeps a record of the boot, which names the host's boot it is
+for; an
+.Nm
+started again in the same boot of the host's boots again only if the
+boot did not end or did not go well.
+carp is demoted by 128 until the boot goes well, or, if it does not,
+until a commit saves.
+A boot that goes well takes away a record of a commit not confirmed,
+as what runs is what it would go back to.
+If
+.Nm
+ends during the boot, the boot did not go well, and the next
+.Nm
+started in the same boot of the host's boots again.
+.Pp
+Each child's
+.Xr chroot 2
+is its user's home directory.
+.Nm
+does not start unless each user, and _nshcheck, exists, is not root,
+and has a uid no other has; nor if _nshweb, the web configurator's
+user, exists and is root or has another's uid.
+.Pp
+Only root and the members of the group nshadmin may connect to the
+read-write socket, and every session there may see the running
+configuration.
+The read-only socket is for anyone.
+.Pp
+system does as root what config asks of it, so a config gone wrong may
+ask it anything a session may, in a commit a session asked: config is
+trusted as the read-write socket's users are.
+After starting the children, the parent stays root only to stop
+system's leftover processes when
+.Nm
+ends.
+.Pp
+The options are as follows:
+.Bl -tag -width Ds
+.It Fl b
+Boot, as above.
+.It Fl d
+Do not daemonize, and log to standard error.
+.It Fl v
+Produce more verbose output.
+.El
+.Sh FILES
+.Bl -tag -width "/var/run/nshd.ro.sockXX" -compact
+.It Pa /var/run/nshd.sock
+the read-write socket, mode 0660, group nshadmin
+.It Pa /var/run/nshd.ro.sock
+the read-only socket, mode 0666
+.It Pa /var/db/nsh/nshrc
+the saved configuration, root's
+.It Pa /var/db/nsh/nshrc.N
+the configurations saved before it, rollback 0 the last
+.It Pa /var/db/nsh/commit
+the commit record
+.It Pa /var/db/nsh/confirm
+the record of a commit not confirmed
+.It Pa /var/db/nsh/boot
+the record of the boot
+.It Pa /var/db/nsh/archive/candidate
+the shared candidate, as archive keeps it
+.El
+.Sh SEE ALSO
+.Xr nsh 8

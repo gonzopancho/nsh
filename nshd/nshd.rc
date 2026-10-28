@@ -1,0 +1,10 @@
+#!/bin/ksh
+
+daemon="/usr/local/sbin/nshd"
+daemon_flags="-b"
+
+. /etc/rc.d/rc.subr
+
+rc_reload=NO
+
+rc_cmd $1

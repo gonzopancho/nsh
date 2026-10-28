@@ -2,26 +2,40 @@
  * nsh externs, prototypes and macros
  */
 
-#define NO_ARG(x) (strcasecmp(x, "no") == 0) /* absolute "no" */
-#define MIN_ARG(x,y) (strncasecmp(x, y, strlen(y)) == 0) /* mabye arg y */
+#ifndef NSH_VERSION
+#error "NSH_VERSION is undefined"
+#endif
+
+#define NSH_STRINGIFY(x) #x
+#define NSH_STRINGVAL(x) NSH_STRINGIFY(x)
+
+#define NSH_VERSION_STR NSH_STRINGVAL(NSH_VERSION)
+
+#define NO_ARG(x)	(strcasecmp(x, "no") == 0) /* absolute "no" */
+
+#define nitems(_a)	(sizeof((_a)) / sizeof((_a)[0])) /* sys/param.h */
 
 struct rtdump {
 	char *buf;	/* start of routing table */
 	char *lim;	/* end of routing table */
 };
 
-extern char *__progname;	/* duh */
 extern char *vers;		/* the version of nsh */
-extern char saveline[256];	/* command line */
-extern char line[256];		/* command line for makeargv() */
+extern char saveline[1024];	/* command line */
+#define NARGS  (sizeof(line)/2)	/* max arguments in char line[] */
+extern char line[1024];		/* command line for makeargv() */
 extern int  margc;		/* makeargv() arg count */
-extern char *margv[];		/* makeargv() args */
+extern char *margv[NARGS];	/* makeargv() args */
 extern int verbose;		/* is verbose mode on? */
 extern int editing;		/* is command line editing mode on? */
+extern int interactive_mode;	/* are we in interactive mode? */
+extern int config_mode;		/* are we in comfig mode? */
 extern int bridge;		/* are we in bridge mode (or interface mode?) */
 extern int priv;		/* privileged mode or not? */
 extern pid_t pid;		/* process id of nsh */
 extern int cli_rtable;		/* environment rtable */
+struct hashtable;
+extern struct hashtable *nsh_env;/* per-user session environment variables */
 
 #define HSIZE	64
 extern char hname[HSIZE];	/* prefix name to mode handler */
@@ -32,19 +46,50 @@ extern HistEvent ev;		/* ev */
 
 /* defaults */
 #define	DEFAULT_MTU	1500		/* net.inet.ip.defmtu */
-#define	DEFAULT_TTL	64		/* net.inet.ip.defttl */
-#define DEFAULT_MTTL	255		/* net.mpls.ttl */
-#define ESP_UDPENCAP_PORT 4500		/* net.inet.esp.udpencap_port */
+
+/* nopt.c */
+#define no_arg		1
+#define req_arg		2
+#define req_2arg	3
+struct nopts {
+	char *name;
+	int type;
+	int arg;
+};
+extern int noptind;
+extern char *nopterr;
+int nopt(int, char **, struct nopts *);
+
+/* ppp.c */
+int intsppp(int, char **, ...);
+int pppoe_ipcp(char *, int, int);
+int intpppoe(int, char **, ...);
+int is_pppoe(char *, int);
+#define NSH_PPPOE_IPADDR_IPCP 1
+#define NSH_PPPOE_IPADDR_STATIC 2
+int pppoe_get_ipaddrmode(char *);
+int pppoe_show_ipaddrmode(char *);
+void pppoe_conf_default_route(FILE *, char *, char *, char *, char *, char *);
+void conf_pppoe(FILE *, int, char *);
+void conf_sppp(FILE *, int, char *);
 
 /* conf.c */
-#define LEASEPREFIX	"/var/db/dhclient.leases"
 int conf(FILE *);
+int conf_rank(char *);
+int conf_rank_rtable(char *);
+void conf_interfaces(FILE *, char *, int);
+#define MTU_IGNORE ULONG_MAX	/* ignore this "default" mtu */
 u_long default_mtu(char *);
+int default_llpriority(char *);
+int default_txprio(char *);
+int default_rxprio(char *);
+int conf_mtu_shown(char *, u_long);
 int conf_routes(FILE *, char *, int, int, int);
+struct rt_msghdr;
+void conf_print_rtm(FILE *, struct rt_msghdr *, char *, int);
 int conf_dhcrelay(char *, char *, int);
 
 /* show.c */
-void p_rttables(int, u_int, int);
 #ifdef _NETINET_IN_H_
 char *routename4(in_addr_t);
 char *netname4(in_addr_t, struct sockaddr_in *);
@@ -68,11 +113,11 @@ char *any_ntoa(const struct sockaddr *);
 
 /* routesys.c */
 #ifdef _NET_ROUTE_H_
-struct m_rtmsg {
-        struct  rt_msghdr m_rtm;
-        char    m_space[512];
+struct rtmsg {
+	struct	rt_msghdr m_rtm;
+	char	m_space[512];
 };
-extern struct m_rtmsg m_rtmsg;
+extern struct rtmsg m_rtmsg;
 #endif
 #ifdef _WANT_SO_
 union   sockunion {
@@ -92,9 +137,9 @@ extern u_long rtm_inits;
 #define FLUSH 0
 struct rtdump *getrtdump(int, int, int);
 void freertdump(struct rtdump *);
-int monitor(int, char **);
+int monitor(int, char **, ...);
 int rtmsg(int, int, int, int, int);
-void flushroutes(int, int);
+void flushroutes(int, int, int);
 void bprintf(FILE *, int, u_char *);
 #ifdef _NET_IF_DL_H_
 char *mylink_ntoa(const struct sockaddr_dl *);
@@ -104,107 +149,30 @@ extern char routeflags[];
 extern char addrnames[];
 extern char metricnames[];
 
-/* ctl.c */
-/* tmp config locations */
-#define PFCONF_TEMP	"/var/run/pf.conf"
-#define OSPFCONF_TEMP	"/var/run/ospfd.conf"
-#define OSPF6CONF_TEMP	"/var/run/ospf6d.conf"
-#define BGPCONF_TEMP	"/var/run/bgpd.conf"
-#define RIPCONF_TEMP	"/var/run/ripd.conf"
-#define LDPCONF_TEMP	"/var/run/ldpd.conf"
-#define IPSECCONF_TEMP	"/var/run/ipsec.conf"
-#define IKECONF_TEMP	"/var/run/iked.conf"
-#define DVMRPCONF_TEMP	"/var/run/dvmrpd.conf"
-#define RTADVCONF_TEMP	"/var/run/rtadvd.conf"
-#define RELAYCONF_TEMP	"/var/run/relayd.conf"
-#define SASYNCCONF_TEMP	"/var/run/sasyncd.conf"
-#define DHCPCONF_TEMP	"/var/run/dhcpd.conf"
-#define SNMPCONF_TEMP	"/var/run/snmpd.conf"
-#define NTPCONF_TEMP	"/var/run/ntpd.conf"
-#define IFSTATE_TEMP	"/var/run/ifstated.conf"
-#define NPPPCONF_TEMP	"/var/run/npppd.conf"
-#define FTPPROXY_TEMP	"/var/run/ftp-proxy"
-#define TFTPPROXY_TEMP	"/var/run/tftp-proxy"
-#define TFTP_TEMP	"/var/run/tftpd"
-#define RESOLVCONF_TEMP	"/var/run/resolv.conf"
-#define RESOLVCONF_SYM	"/var/run/resolv.conf.symlink"
-#define RESOLVCONF_DHCP	"/var/run/resolv.conf.dhcp"
-#define INETCONF_TEMP	"/var/run/inetd.conf"
-#define SSHDCONF_TEMP	"/var/run/sshd.conf"
-#define SMTPCONF_TEMP 	"/var/run/smtpd.conf"
-#define LDAPCONF_TEMP	"/var/run/ldapd.conf"
-#define IFSTATECONF_TEMP "/var/run/ifstated.conf"
-/* argument list replacement */
-#define OPT     (void *)1
-#define REQ     (void *)2
-#define IFNAME  (void *)3
-#define REQTEMP (void *)4
-#define SIZE_CONF_TEMP 64
-int ctlhandler(int, char **, char *);
-void rmtemp(char *);
-/* control programs */
-#define PFCTL		"/sbin/pfctl"
-#define OSPFCTL		"/usr/sbin/ospfctl"
-#define OSPF6CTL	"/usr/sbin/ospf6ctl"
-#define BGPCTL		"/usr/sbin/bgpctl"
-#define RIPCTL		"/usr/sbin/ripctl"
-#define LDPCTL		"/usr/sbin/ldpctl"
-#define IPSECCTL	"/sbin/ipsecctl"
-#define IKECTL		"/usr/sbin/ikectl"
-#define DVMRPCTL	"/usr/sbin/dvmrpctl"
-#define RELAYCTL	"/usr/sbin/relayctl"
-#define SNMPCTL		"/usr/sbin/snmpctl"
-#define SMTPCTL		"/usr/sbin/smtpctl"
-#define LDAPCTL		"/usr/sbin/ldapctl"
-struct ctl {
-	char *name;
-	char *help;
-	char *args[32];
-	void (*handler)();
-	int flag_x;
-};
-struct daemons {
-        char *name;
-	char *propername;
-        struct ctl *table;
-        char *tmpfile;
-	mode_t mode;
-	int doreload;
-	int rtablemax;
-};
-extern struct daemons ctl_daemons[];
-extern struct ctl ctl_pf[];
-extern struct ctl ctl_ospf[];
-extern struct ctl ctl_ospf6[];
-extern struct ctl ctl_relay[];
-extern struct ctl ctl_bgp[];
-extern struct ctl ctl_rip[];
-extern struct ctl ctl_ldp[];
-extern struct ctl ctl_ipsec[];
-extern struct ctl ctl_nppp[];
-extern struct ctl ctl_ifstate[];
-extern struct ctl ctl_ike[];
-extern struct ctl ctl_dvmrp[];
-extern struct ctl ctl_rtadv[];
-extern struct ctl ctl_sasync[];
-extern struct ctl ctl_dhcp[];
-extern struct ctl ctl_snmp[];
-extern struct ctl ctl_smtp[];
-extern struct ctl ctl_sshd[];
-extern struct ctl ctl_ntp[];
-extern struct ctl ctl_ftpproxy[];
-extern struct ctl ctl_tftpproxy[];
-extern struct ctl ctl_tftp[];
-extern struct ctl ctl_dns[];
-extern struct ctl ctl_inet[];
-extern struct ctl ctl_ldap[];
-void flag_x(char *, char *, int, char *);
+/* ctl.c declarations moved to ctl.h */
+
+/* cmdargs.c */
+int cmdargs_output_setenv(char *, char **, int, int, char **, int);
+int cmdargs_output(char *, char **, int, int);
+int cmdargs(char *, char **);
+int cmdargs_nowait(char *, char **, int);
+int cmdargs_wait_for_child(void);
+int nsh_setrtable(int);
 
 /* commands.c */
+extern pid_t child;
 #define NOPTFILL	7
 #define DEFAULT_EDITOR	"/usr/bin/vi"
-#define NSHRC_TEMP	"/var/run/nshrc"
 #define NSHRC		"/etc/nshrc"
+#define NSHDB		"/var/db/nsh"	/* the configurations saved */
+#define SAVED		NSHDB "/nshrc"	/* nshd's, where nshd saves */
+#define ROLLBACKS	50		/* how many, rollback 0 the last */
+#define ROLLBACK	NSHDB "/nshrc.%d"
+#define ROLLBACK_HEAD	"# saved by "	/* who saved it, and why */
+#define ROLLBACK_GEN	"# generation "	/* then which save it was */
+#define CONFIRM		"/var/run/nshconfirm"	/* a commit to confirm */
+#define CLEAR		"/usr/bin/clear"
+#define LOGGER		"/usr/bin/logger"
 #define PING		"/sbin/ping"
 #define PING6		"/sbin/ping6"
 #define TRACERT		"/usr/sbin/traceroute"
@@ -212,35 +180,84 @@ void flag_x(char *, char *, int, char *);
 #define TELNET		"/usr/bin/telnet"
 #define SSH		"/usr/bin/ssh"
 #define PKILL		"/usr/bin/pkill"
-#define SAVESCRIPT	"/usr/local/bin/save.sh"
-/* tmp config locations */
-#define DHCPDB          "/var/db/dhcpd.leases"
+#define CRONTAB		"/usr/bin/crontab"
+#define REBOOT		"/sbin/reboot"
+#define HALT		"/sbin/halt"
+#define SU		"/usr/bin/su"
+#define USERADD		"/usr/sbin/useradd"
+#define USERMOD		"/usr/sbin/usermod"
+#define USERDEL		"/usr/sbin/userdel"
+#define NSH_SHELL	"/usr/local/bin/nsh"	/* an account nshd makes runs it */
+#define NSH_GROUP	"nshadmin"	/* nshd.h's NSHD_GROUP */
+#define NSHLOGIN	NSHDB "/login"	/* the login classes and users */
+#define DOAS		"/usr/bin/doas"
+#ifndef DHCPLEASES
+#define DHCPLEASES	"/var/db/dhcpd.leases"
+#endif
+int quit(int, char **, ...);
+void sigalarm(int);
 void command(void);
-char **step_optreq(char **, char **, int, char **, int);
 int argvtostring(int, char **, char *, int);
-int cmdrc(char rcname[FILENAME_MAX]);
-int cmdargs(char *, char **);
+int cmdline(char *);
+int cmdexit(void);
+int cmdline_nshd(char *);
+void nshd_mode(int, char *, int);
+extern int in_config;
+int conf_save(void);
+int conf_mode(char *);
+int conf_ordered(char *);
+
+/* A command a configuration has (conf_cmd()) */
+struct confcmd {
+	char	*name;
+	int	(*handler)(int, char **, ...);
+	int	 flags;
+};
+#define CF_NO		0x1	/* a top-level one takes no */
+#define CF_IF		0x2	/* it heads an interface's block */
+#define CF_BRIDGE	0x4	/* a bridge's */
+#define CF_RTABLE	0x8	/* an rtable's */
+const struct confcmd *conf_cmd(int, int);
+int conf_find(int, char *, char **);
+int conf_run(int, int, int, char **, char *);
+void conf_reading(int);
+void conf_block_end(int);
+void conf_settle(void);
+
+/* prompt.c */
 char *iprompt(void);
 char *cprompt(void);
 char *pprompt(void);
-int group (int, char **);
+void setprompt(const char *);
+void restoreprompt(void);
+extern char prompt[128];
+extern char saved_prompt[sizeof(prompt)];
+
+int group (int, char **, ...);
 void gen_help(char **, char *, char *, int);
-void makeargv(void);
+int makeargv(void);
+int argsplit(char *, char **, size_t);
 extern size_t cursor_argc;
 extern size_t cursor_argo;
 
+/*
+ * A command's handler returns 0 when it did what was asked, -1 when it
+ * did not, having said why, and 1 to leave the mode it runs in
+ */
 typedef struct cmd {
 	char *name;		/* command name */
 	char *help;		/* help string (NULL for no help) */
 	char *complete;		/* context sensitive completion list */
 	char **table;		/* next table for context completion */
 	int stlen;		/* struct length (for rows in next table) */
-	int (*handler) ();	/* routine which executes command */
-	int needpriv;		/* Do we need privilege to execute? */   
+	int (*handler) (int, char **, ...); /* routine which executes command */
+	int needpriv;		/* Do we need privilege to execute? */
+	int needconfig;		/* Do we need config mode to execute? */
 	int nocmd;		/* Can we specify 'no ...command...'? */
-	int modh;		/* Is it a mode handler for cmdrc()? */
+	int modh;		/* Does it head a block? 2, an rtable's */
+	int cand;		/* What it does in configure private (CAND_*) */
 } Command;
- 
+
 typedef struct menu {
 	char *name;		/* How user refers to it (case independent) */
 	char *help;		/* Help information (0 ==> no help) */
@@ -249,7 +266,7 @@ typedef struct menu {
 	int stlen;		/* struct length (for rows in next table) */
 	int minarg;		/* Minimum number of arguments */
 	int maxarg;		/* Maximum number of arguments */
-	int (*handler)();	/* Routine to perform (for special ops) */
+	int (*handler)(int, char **, ...);	/* Routine to perform */
 } Menu;
 
 struct intlist {
@@ -258,8 +275,9 @@ struct intlist {
 	char *complete;		/* context sensitive completion list */
 	char **table;		/* next table for context completion */
 	int stlen;		/* struct length (for rows in next table) */
-	int (*handler)();       /* Routine to perform (for special ops) */
-	int bridge;             /* 0 == Interface, 1 == Bridge, 2 == Both */
+	int (*handler)(int, char **, ...);       /* Routine to perform */
+	int nocmd;		/* Can we specify 'no ...command...'? */
+	int cand;		/* What it does in configure private (CAND_*) */
 };
 
 /* generic help /complt struct */
@@ -272,7 +290,12 @@ struct ghs {
 };
 
 extern Command cmdtab[];
+extern size_t cmdtab_nitems;
 extern struct intlist Intlist[];
+extern struct intlist Bridgelist[];
+extern struct intlist *whichlist;
+extern size_t Intlist_nitems;
+extern size_t Bridgelist_nitems;
 
 /* ieee80211.c */
 #define NWID 0
@@ -285,30 +308,16 @@ const char *get_string(const char *, const char *, u_int8_t *, int *);
 void make_string(char *str, int, const u_int8_t *buf, int);
 int get_nwinfo(char *, char *, int, int);
 int get_nwpowersave(int, char *);
-int intnwkey(char *, int, int, char **);
-int inttxpower(char *, int, int, char **);
-int intbssid(char *, int, int, char **);
+int intnwkey(int, char **, ...);
+int inttxpower(int, char **, ...);
+int cand_nwid(char *, u_int8_t *, int);
+int cand_powersave(char *, int, int);
+int intbssid(int, char **, ...);
 
 /* stats.c */
-void rt_stats(void);
-void tcp_stats(void);
-void udp_stats(void);
-void ip_stats(void);
-void icmp_stats(void);
-void igmp_stats(void);
-void ah_stats(void);
-void esp_stats(void);
-void ipip_stats(void);
-void carp_stats(void);
-void pfsync_stats(void);
-void ipcomp_stats(void);
-
-/* mbuf.c */
-void mbpr(void);
-
-/* kread.c */
 char *plural(int);
 char *plurales(int);
+int pf_enabled(void);
 
 /* genget.c */
 int isprefix(char *, char*);
@@ -317,33 +326,45 @@ int Ambiguous(void *);
 
 /* sysctl.c */
 int sysctl_int(int[], int, int);
-int ipsysctl(int, char *, char *, int);
+int ipsysctl(int, char **, ...);
 void conf_sysctls(FILE *);
 
 /* route.c */
 #define NO_NETMASK 0
 #define ASSUME_NETMASK 1
-int route(int, char**);
-void show_route(char *, int);
+int route(int, char**, ...);
+int show_route(char *, int);
+int is_ip_addr(char *);
 #ifdef _IP_T_
 void parse_ip_pfx(char *, int, ip_t *);
-int ip_route(ip_t *, ip_t *, u_short, int, int);
+int ip_route(ip_t *, ip_t *, u_short, int, int, struct rt_metrics, int inits);
 #endif
+int route_cand(struct rt_msghdr *);
+int rtnameserver(int, char *[], int);
 #ifdef _NETINET6_IN6_H_
 int parse_ipv6(char *, struct in6_addr *);
 #endif
 
 /* if.c */
-#define DHCLIENT	"/sbin/dhclient"
 #define DHCRELAY	"/usr/sbin/dhcrelay"
+#define RAD		"/usr/sbin/rad"
+#define DHCPLEASED_SOCK	"/dev/dhcpleased.sock"
+#define SLAACD_SOCK	"/dev/slaacd.sock"
 #define IFDATA_MTU 1		/* request for if_data.ifi_mtu */
 #define IFDATA_BAUDRATE 2	/* request for if_data.ifi_baudrate */
+#define IFDATA_IFTYPE 3		/* request for if_data.ifi_type */
 #define MBPS(bps) (bps / 1000 / 1000)
 #define ROUNDMBPS(bps) ((float)bps == ((bps / 1000 / 1000) * 1000 * 1000))
 #define ROUNDKBPS(bps) ((float)bps == ((bps / 1000) * 1000))
 #define ROUNDKBYTES(bytes) ((float)bytes == ((bytes / 1024) * 1024))
+void imr_init(char *);
+int cand_upline(char *, int);
 int is_valid_ifname(char *);
-int show_int(int, char **);
+int show_int(int, char **, ...);
+void ip6_optstr(char *, size_t, int, u_int32_t, u_int32_t);
+int show_vlans(int, char **, ...);
+int show_ip(int, char **, ...);
+int show_autoconf(int, char **, ...);
 int get_rdomain(int, char *);
 int get_ifdata(char *, int);
 int get_ifflags(char *, int);
@@ -352,76 +373,116 @@ int get_ifxflags(char *, int);
 int set_ifxflags(char *, int, int);
 u_int32_t in4_netaddr(u_int32_t, u_int32_t);
 u_int32_t in4_brdaddr(u_int32_t, u_int32_t);
-int intip(char *, int, int, char **);
-int intmtu(char *, int, int, char **);
-int intkeepalive(char *, int, int, char **);
-int intlabel(char *, int, int, char **);
-int intrdomain(char *, int, int, char **);
-int intdhcrelay(char *, int, int, char **);
-int intmetric(char *, int, int, char **);
-int intvlan(char *, int, int, char **);
-int intflags(char *, int, int, char **);
-int intxflags(char *, int, int, char **);
-int intlink(char *, int, int, char **);
-int intnwid(char *, int, int, char **);
-int intpowersave(char *, int, int, char **);
-int intdesc(char *, int, int, char **);
-int intpflow(char *, int, int, char **);
-int intlladdr(char *, int, int, char **);
-int intgroup(char *, int, int, char **);
-int intrtlabel(char *, int, int, char **);
+extern struct ghs intiphelp[];
+extern struct ghs intip6help[];
+int intip(int, char **, ...);
+int intipcp(char *, int, int, char **);
+int intmtu(int, char **, ...);
+int intkeepalive(int, char **, ...);
+int intrdomain(int, char **, ...);
+int intdhcrelay(int, char **, ...);
+int intmetric(int, char **, ...);
+int intllprio(int, char **, ...);
+int intflags(int, char **, ...);
+int intxflags(int, char **, ...);
+int intaf(char *, int, int, char **);
+int intlink(int, char **, ...);
+int intnwid(int, char **, ...);
+int intpowersave(int, char **, ...);
+int intdesc(int, char **, ...);
+int intpflow(int, char **, ...);
+int intlladdr(int, char **, ...);
+int intgroup(int, char **, ...);
+int intrtlabel(int, char **, ...);
+int intparent(int, char **, ...);
+int intpatch(int, char **, ...);
+int intmpls(int, char **, ...);
+int intpwe3(int, char **, ...);
+int intvnetflowid(int, char **, ...);
+int addaf(char *, int, int);
+int removeaf(char *, int, int);
+int check_daemon_control_socket(const char *);
+int dhcpleased_is_running(void);
 char *get_hwdaddr(char *);
 
 /* main.c */
 void intr(void);
 
 /* version.c */
-int version(int, char **);
+int version(int, char **, ...);
 
 /* compile.c */
 extern char compiled[], compiledby[], compiledon[], compilehost[];
 
 /* bridge.c */
 long bridge_cfg(int, char *, int);
+void conf_brcfg(FILE *, int, char *);
 int bridge_confaddrs(int, char *, char *, FILE *);
 int bridge_rules(int, char *, char *, char *, FILE *);
 int bridge_list(int, char *, char *, char *, int, int);
-int bridge_addrs(int, char *, char *, char *);
+int bridge_member_search(int, char *);
+int brport_list(char *);
+int brport_one(char *);
 int set_ifflag(int, char *, short);
 int clr_ifflag(int, char *, short);
 int is_bridge(int, char *);
-int brport(char *, int, int, char **);
-int brval(char *, int, int, char **);
-int brrule(char *, int, int, char **);
-int brstatic(char *, int, int, char **);
-int brpri(char *, int, int, char **);
-int flush_bridgedyn(char *);
-int flush_bridgeall(char *);
-int flush_bridgerule(char *, char*);
+int brport(int, char **, ...);
+int brval(int, char **, ...);
+int brrule(int, char **, ...);
+int brstatic(int, char **, ...);
+int brpri(int, char **, ...);
+int flush_bridgedyn(int , char **, ...);
+int flush_bridgeall(int, char **, ...);
+int flush_bridgerule(int, char **, ...);
+int brprotect(int, char **, ...);
+int show_bridges(int, char **, ...);
 
 /* tunnel.c */
-int inttunnel(char *, int, int, char **);
+int inttunnel(int, char **, ...);
+int intvnetid(int, char **, ...);
+int get_physrtable(int, char *);
+int get_physttl(int, char *);
+int get_physecn(int, char *);
+int get_physdf(int, char *);
+int64_t get_vnetid(int, char *);
 
 /* media.c */
 #define DEFAULT_MEDIA_TYPE	"autoselect"
-void media_status(int, char *, char *);
-void media_supported(int, char *, char *, char *);
-int phys_status(int, char *, char *, char *, int, int, int *);
-int intmedia(char *, int, int, char **);
-int intmediaopt(char *, int, int, char **);
+void media_supported(int, char *, char *, char *, FILE *);
+int phys_status(int, char *, char *, char *, int, int);
+int intmedia(int, char **, ...);
+int intmediaopt(int, char **, ...);
 int conf_media_status(FILE *, int, char *);
+struct ifmediareq;
+const char *get_ifm_linkstate_str(struct ifmediareq *);
+const char *get_ifm_options_str(char *, size_t, uint64_t, uint64_t *);
+const char *get_ifm_type_str(uint64_t);
+const char *get_ifm_subtype_str(uint64_t);
 
 /* passwd.c */
-#define NSHPASSWD_TEMP "/var/run/nshpasswd"
-int read_pass(char *, size_t);
-int gen_salt(char *, size_t);
-int enable(int, char **);
+#define LOGIN_VIEW	0x1	/* a login class's permissions */
+#define LOGIN_OPERATE	0x2
+#define LOGIN_CONFIGURE	0x4
+#define LOGIN_ADMIN	0x8
+#define LOGIN_EXEC	0x10
+#define LOGIN_ALL	0x1f
+int loginset(int, char **, ...);
+int login_class_perms(const char *);
+int login_perms(uid_t);
+int login_auth(char *, char *);
+size_t login_hide(char *, size_t);
+void conf_login(FILE *);
+/* while a commit runs, whether its session lacks admin (ctl.c) */
+void admin_begin(int, char *, size_t);
+void admin_end(void);
+int admin_may(char *, int, int);
+int admin_test(char *, char *, size_t);
 
 /* pfsync.c */
 #define PFSYNC_MAXUPDATES 128
-int intsyncdev(char *, int, int, char **);
-int intsyncpeer(char *, int, int, char  **);
-int intmaxupd(char *, int, int, char **);
+int intsyncdev(int, char **, ...);
+int intsyncpeer(int, char **, ...);
+int intmaxupd(int, char **, ...);
 int conf_pfsync(FILE *, int, char *);
 
 /* carp.c */
@@ -430,29 +491,41 @@ int conf_pfsync(FILE *, int, char *);
 #define CARP_VHID 2
 #define CARP_PEER 3
 #define CARP_BALANCING 4
-int intcarp(char *, int, int, char **);
-int intcpass(char *, int, int, char **);
-int intcnode(char *, int, int, char **);
+int intcarp(int, char **, ...);
+int intcpass(int, char **, ...);
+int intcnode(int, char **, ...);
 int conf_carp(FILE *, int, char *);
-int carp_state(int, char *);
-int intcdev(char *, int, int, char **);
+int intcdev(int, char **, ...);
+int carplock(int);
 
 /* trunk.c */
-int inttrunkport(char *, int, int, char **);
-int inttrunkproto(char *, int, int, char **);
+int inttrunkport(int, char **, ...);
+int inttrunkproto(int, char **, ...);
 int conf_trunk(FILE *output, int ifs, char *ifname);
-void show_trunk(int ifs, char *ifname);
 
 /* who.c */
-int who(int, char **);
-
-/* timeslot.c */
-int inttimeslot(char *, int, int, char **);
-int timeslot_status(int, char *, char *, int);
+int who(int, char **, ...);
 
 /* arp.c */
-int arpget(const char *);
-int arpset(int, char **);
+int arpset(int, char **, ...);
+struct in_addr;
+int getinetaddr(const char *, struct in_addr *);
+void conf_arp(FILE *, char *, int);
+char *sec2str(time_t);
+struct sockaddr_dl;
+char *ether_str(struct sockaddr_dl *);
+
+/* ndp.c */
+int ndpset(int, char **, ...);
+int ndpdelete(const char *);
+struct sockaddr_in6;
+int parse_host(const char *, struct sockaddr_in6 *);
+void ndpflush(void);
+void conf_ndp(FILE *output, char *delim, int);
+
+/* nameserver.c */
+int nameserverset(int, char **, ...);
+void conf_nameserver(FILE *);
 
 /* more.c */
 int more(char *);
@@ -464,12 +537,25 @@ extern struct winsize winsize;
 #endif
 
 /* complete.c */
-#ifdef _HISTEDIT_H_
-unsigned char complt_c(EditLine *, int);
-unsigned char complt_i(EditLine *, int);
-#endif
 #define CMPL(x) __STRING(x),
 #define CMPL0   "",
+#define CMPLT_WORD	256	/* the longest word completed, with its NUL */
+#ifdef _STRINGLIST_H
+/* what completing a line's word found: text to insert, or the choices */
+struct cmplt {
+	char		 insert[1024];	/* at the cursor */
+	StringList	*words;		/* or the choices, to list */
+	StringList	*helps;		/* and each one's help, or NULL */
+	char		*cmdname;	/* a choice with help: "cmdname word" */
+	int		 vertical;	/* list the choices in columns anyway */
+	int		 help;		/* insert nothing; list every choice */
+};
+#endif
+struct cmplt;
+unsigned char complete_line(const char *, size_t, size_t, char *, char **,
+    size_t, int, struct cmplt *);
+void cmplt_free(struct cmplt *);
+extern int cmplt_remote;
 void inithist(void);
 void endhist(void);
 void initedit(void);
@@ -480,20 +566,48 @@ int string_index(char *, char **);
 char *format_time(time_t);
 char *format_k(uint64_t amt);
 
+/* client.c */
+#define NSHD_CPRIVATE	1	/* configure private, nshd's NSHD_PRIVATE */
+#define NSHD_CSHARED	2	/* configure, NSHD_SHARED */
+#define NSHD_CEXCLUSIVE	3	/* configure exclusive, NSHD_EXCLUSIVE */
+#define NSHD_CTERMINAL	4	/* configure terminal, NSHD_TERMINAL */
+extern int nshd_config;
+extern int nshd_rtable;
+int nshd_show(char *);
+int nshd_runs(const char *);
+int nshd_execs(void);
+int nshd_priv(int);
+int nshd_configure(int);
+const char *nshd_cname(void);
+int nshd_line(char *);
+int nshd_exit(void);
+int nshd_commit(int, int, char *);
+int nshd_load(const char *);
+int nshd_rollback(int);
+int nshd_cshow(char *);
+int nshd_rules(char *, int, int, char *);
+int show_log(int, char **, ...);
+
 /* sqlite3.c */
 #define SQ3DBFILE "/var/run/nsh.db"
-#define DB_X_ENABLE 1
-#define DB_X_DISABLE 2
-#define DB_X_LOCAL 3
-#define DB_X_OTHER 4
-#define DB_X_REMOVE 5
+#define DB_X_ENABLE 1		/* enable command */
+#define DB_X_DISABLE 2		/* disable command */
+#define DB_X_LOCAL 3		/* local control command */
+#define DB_X_OTHER 4		/* other command */
+#define DB_X_REMOVE 5		/* remove command */
+#define DB_X_ENABLE_DEFAULT 6	/* enable command, always prints enable until disabled */
+#define DB_X_DISABLE_ALWAYS 7	/* disable command, always prints if disabled */
+void db_create(void);
 int db_create_table_rtables(void);
 int db_create_table_flag_x(char *);
+int db_create_table_nameservers(void);
 int db_insert_flag_x(char *, char *, int, int, char *);
 int db_insert_rtables(int, char *);
+int db_insert_nameserver(char *);
 int db_delete_rtables_rtable(int);
-int db_delete_flag_x_ctl(char *, char *);
+int db_delete_flag_x_ctl(char *, char *, int);
 int db_delete_flag_x_ctl_data(char *, char *, char *);
+int db_delete_nameservers(void);
 #ifdef _STRINGLIST_H
 int db_select_flag_x_ctl_data(StringList *, char *, char *, char *);
 int db_select_flag_x_ctl(StringList *, char *, char *);
@@ -501,7 +615,150 @@ int db_select_rtable_rtables(StringList *);
 int db_select_rtables_rtable(StringList *, int);
 int db_select_rtables_ctl(StringList *, char *);
 int db_select_name_rtable(StringList *, int);
-int db_select_flag_x_ctl_rtable(StringList *, char *, int);
 int db_select_flag_x_data_ctl_rtable(StringList *, char *, char *, int);
+int db_select_nameservers(StringList *);
 #endif
 int db_select_flag_x_dbflag_rtable(char *, char *, int);
+
+/* pflow.c */
+#define PFLOW_SENDER 0
+#define PFLOW_RECEIVER 1
+#define PFLOW_VERSION 2
+#define PFLOW_ADDRSTRLEN (NI_MAXHOST + sizeof("[]:65535"))
+#ifdef _SYS_SOCKET_H_
+int pflow_addr(const char *, struct sockaddr_storage *);
+int pflow_addrstr(struct sockaddr_storage *, char *);
+#endif
+int pflow_status(int, int, char *, char *);
+
+/* wg.c */
+int intwg(int, char **, ...);
+int intwgpeer(int, char **, ...);
+void conf_wg(FILE *, int, char *);
+
+/* umb.c */
+int intumb(int, char **, ...);
+void conf_umb(FILE *, int, char *);
+
+/* utf8.c */
+#ifdef _WCHAR_H_
+int mbs2ws(wchar_t **, size_t *, const char *);
+#endif
+int mbsavis(char**, int *, const char *);
+
+/* ctlargs.c */
+struct prot1;
+int pr_prot1(int, char **, ...);
+char **step_optreq(char **, char **, int, char **, int);
+struct prot1 *prot1_find(char *, char *);
+int prot1_run(char *, char *, int, char **, char **);
+char **prot1_args(struct prot1 *, char **, int, char **, int);
+
+/* hashtable.c */
+struct hashtable;
+struct hashtable *hashtable_alloc(void);
+void hashtable_free(struct hashtable *);
+int hashtable_add(struct hashtable *, void *key, size_t keysize,
+    void *value, size_t valsize);
+void *hashtable_get_keyptr(struct hashtable *, void *key, size_t keysize);
+void *hashtable_get_value(struct hashtable *, void *key, size_t keysize);
+int hashtable_remove(struct hashtable *, void **keyptr, void **value,
+    size_t *valsize, void *key, size_t keysize);
+int hashtable_contains(struct hashtable *, void *key, size_t keysize);
+int hashtable_foreach(struct hashtable *,
+    int (*cb)(void *, size_t, void *, size_t, void *),
+    void *cb_arg);
+int hashtable_num_entries(struct hashtable *);
+
+/* candidate.c */
+#define CAND_NO		0	/* refused in configure private, for now */
+#define CAND_RUN	1	/* runs as it does outside configure private */
+#define CAND_EDIT	2	/* its handler edits the candidate */
+struct cnode;
+extern int candidate;
+int cand_begin(void);
+void cand_end(void);
+int cand_changed(void);
+extern int cand_sharing;
+struct cand_shared;
+void cand_share(struct cand_shared *, int);
+void cand_detach(void);
+int cand_conflicts(struct cnode *, int);
+int cand_setting(int, const char *, ...)
+    __attribute__((__format__ (printf, 2, 3)));
+char *cand_line(char *, size_t);
+int cand_putlines(char **, size_t, char *);
+int cand_ifsetting(char *, int, const char *, ...)
+    __attribute__((__format__ (printf, 3, 4)));
+char *cand_ifline(char *, char *, size_t);
+int cand_state(char *);
+int cand_getflags(char *, int);
+int cand_gettype(char *);
+int cand_ispppoe(char *);
+int cand_takes(char *, u_long);
+int cand_hasif(char *);
+char *cand_listowner(char *, char *, char *);
+int cand_interface(int, char *, int *);
+int cand_isbridge(char *);
+struct cnode *cand_tree(void);
+int pr_cand_conf(int, char **, ...);
+int cand_rollback(int, char **, ...);
+int cand_restart(struct cnode *, int);
+extern int cand_rtable;
+int cand_rtable_set(int, int, char *);
+char *cand_rule(char *, size_t);
+int cand_setrules(char *, char **, size_t);
+int cand_hasrtable(int);
+struct cnode *running_tree(void);
+void running_set(struct cnode *);
+int cand_cloneable(char *);
+int cand_write(FILE *);
+
+/* commit.c */
+#define MAXCLEARS	64
+#define COMMENTMAX	256	/* a commit's comment, with its NUL */
+/* What makes one configuration read as another */
+struct script {
+	char *text;			/* lines, as conf() prints them */
+	size_t len;
+	char *edits;			/* what system runs (script_run()) */
+	size_t elen;
+	struct {
+		char name[32];
+		int rtable;
+		int keep;
+	} clears[MAXCLEARS];		/* daemon rules no script can write */
+	int nclears;
+};
+int commit(int, char **, ...);
+int pr_rollback(int, char **, ...);
+int commit_expire(void);
+int commit_boot(char *);
+int rollback_keep(const char *, const char *, const char *);
+int saved_write(void);
+int saved_diff(int);
+int saved_differs(void);
+/* operations, which nshd's system runs */
+#define OP_DIFFERS	3	/* an operation's status: what it compared differs */
+int op_allowed(int, char **);
+int op_run(int, char **, int);
+int saved_text(FILE *);
+int saved_first(void);
+int commit_checks(struct cnode *, struct cnode *, int);
+int commit_problems(struct cnode *, struct cnode *);
+int commit_verdict(int, int);
+struct plan_test;
+int commit_deferred(struct plan_test **);
+int commit_refused_by(char *, char *);
+int commit_took(struct cnode *, struct cnode *);
+void commit_untaken(struct cnode *, struct cnode *, int);
+int commit_back(struct cnode *, struct cnode *);
+int commit_booted(struct cnode *, struct cnode *);
+int commit_reads(char *, size_t, char *, size_t);
+int commit_recover(char *, size_t);
+int rollback_text(int, FILE *);
+int rollback_diff(int, FILE *);
+void rollback_list(FILE *);
+int script_make(struct cnode *, struct cnode *, struct script *, int);
+int script_run(struct script *);
+void script_free(struct script *);

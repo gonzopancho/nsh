@@ -19,6 +19,7 @@
 #include <string.h>
 #include <netinet/in.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <sys/param.h>
 #include <sys/sysctl.h>
 #include <sys/socket.h>
@@ -35,11 +36,37 @@
 #include <netmpls/mpls.h>
 #include <ddb/db_var.h>
 #include "externs.h"
+#include "settings.h"
 #include "sysctl.h"
 
 #define	MIB_STOP	INT_MAX
 
+#define	DEFAULT_ARPTIMEOUT		1200	/* net.inet.ip.arptimeout */
+#define	DEFAULT_ARPDOWN			20	/* net.inet.ip.arpdown */
+#define	DEFAULT_TTL			64	/* net.inet.ip.defttl */
+#define	DEFAULT_MTTL			255	/* net.mpls.ttl */
+#define	ESP_UDPENCAP_PORT		4500	/* net.inet.esp.udpencap_port */
+#define	DEFAULT_MAXQUEUE		300	/* net.inet.ip.maxqueue */
+#define	DEFAULT_MTUDISCTIMEOUT		600	/* net.inet.ip.mtudisctimeout */
+#define	DEFAULT_IPSEC_TIMEOUT		86400	/* net.inet.ip.ipsec-timeout */
+#define	DEFAULT_IPSEC_SOFT_TIMEOUT	80000	/* net.inet.ip.ipsec-soft-timeout */
+#define	DEFAULT_IPSEC_EXPIRE_ACQUIRE	30	/* net.inet.ip.ipsec-expire-acquire */
+#define	DEFAULT_IPSEC_FIRSTUSE		7200	/* net.inet.ip.ipsec-firstuse */
+#define	DEFAULT_IPSEC_SOFT_FIRSTUSE	3600	/* net.inet.ip.ipsec-soft-firstuse */
+#define	DEFAULT_IPSEC_INVALID_LIFE	60	/* net.inet.ip.ipsec-invalid-life */
+#define	DEFAULT_MAXFRAGPACKETS		200	/* net.inet6.ip6.maxfragpackets */
+#define	DEFAULT_MAXFRAGS		200	/* net.inet6.ip6.maxfrags */
+#define	DEFAULT_PORTFIRST		1024	/* net.inet.ip.portfirst */
+#define	DEFAULT_PORTLAST		49151	/* net.inet.ip.portlast */
+#define	DEFAULT_PORTHIFIRST		49152	/* net.inet.ip.porthifirst */
+#define	DEFAULT_PORTHILAST		65535	/* net.inet.ip.porthilast */
+#define	DEFAULT_HLIM			64	/* net.inet6.ip6.hlim */
+#define	DEFAULT_LOG_INTERVAL		5	/* net.inet6.ip6.log_interval */
+#define	DEFAULT_HDRNESTLIMIT		10	/* net.inet6.ip6.hdrnestlimit */
+#define	DEFAULT_DAD_COUNT		1	/* net.inet6.ip6.dad_count */
+
 void conf_sysctl(FILE *, char *, struct ipsysctl *);
+static void sysctl_line(char *, size_t, char *, struct ipsysctl *, int);
 
 /*
  * sysctl_int: get or set an int value
@@ -66,12 +93,21 @@ sysctl_int(int mib[], int val, int read)
 			break;
 
 	if (sysctl(mib, i, &old, &len, valp, sizeof(int)) == -1) {
-		if (read && errno != ENOPROTOOPT)
+		if (!read) {
 			printf("%% sysctl_int: sysctl: %s\n", strerror(errno));
-		return(-1);
+		} else if (errno != ENOPROTOOPT && errno != EOPNOTSUPP) {
+			/* those two say this kernel has no such sysctl */
+			printf("%% sysctl_int: sysctl: %s\n", strerror(errno));
+			for (i = 0; i < 6; i++) {
+		                if (mib[i] == MIB_STOP)
+					break;
+				printf("%% mib[%i] == %i\n",i,mib[i]);
+			}
+		}
+		return -1;
 	}
 
-	return(old);
+	return old;
 }
 
 struct sysctltab sysctls[] = {
@@ -92,7 +128,6 @@ struct ipsysctl ipsysctls[] = {
 { "ipip",		{ CTL_NET, PF_INET, IPPROTO_IPIP, IPIPCTL_ALLOW, MIB_STOP, 0 },		0, 1	},
 { "gre",		{ CTL_NET, PF_INET, IPPROTO_GRE, GRECTL_ALLOW, MIB_STOP, 0 },		0, 1	},
 { "wccp",		{ CTL_NET, PF_INET, IPPROTO_GRE, GRECTL_WCCP, MIB_STOP, 0 },		0, 1	},
-{ "mobileip",		{ CTL_NET, PF_INET, IPPROTO_MOBILE, MOBILEIPCTL_ALLOW, MIB_STOP, 0 },	0, 1	},
 { "etherip",		{ CTL_NET, PF_INET, IPPROTO_ETHERIP,ETHERIPCTL_ALLOW, MIB_STOP, 0 },	0, 1	},
 { "ipcomp",		{ CTL_NET, PF_INET, IPPROTO_IPCOMP, IPCOMPCTL_ENABLE, MIB_STOP, 0 },	0, 1	},
 { "esp",		{ CTL_NET, PF_INET, IPPROTO_ESP, ESPCTL_ENABLE, MIB_STOP, 0 },		0, 0	},
@@ -101,13 +136,29 @@ struct ipsysctl ipsysctls[] = {
 { "ah",			{ CTL_NET, PF_INET, IPPROTO_AH,	AHCTL_ENABLE, MIB_STOP, 0 },		0, 0	},
 { "sourceroute",	{ CTL_NET, PF_INET, IPPROTO_IP,	IPCTL_SOURCEROUTE, MIB_STOP, 0 },	0, 1	},
 { "encdebug",		{ CTL_NET, PF_INET, IPPROTO_IP,	IPCTL_ENCDEBUG, MIB_STOP, 0 },		0, 1	},
-{ "ifq-maxlen",		{ CTL_NET, PF_INET, IPPROTO_IP,	IPCTL_IFQUEUE, IFQCTL_MAXLEN, MIB_STOP }, IFQ_MAXLEN, 0 },
 { "send-redirects",	{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_SENDREDIRECTS, MIB_STOP, 0 },	0, 0	},
 { "directed-broadcast",	{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_DIRECTEDBCAST, MIB_STOP, 0 },	0, 1	},
 { "multipath",		{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_MULTIPATH, MIB_STOP, 0 },		0, 1	},
-#ifdef notyet
-{ "default-mtu",	{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_DEFMTU, MIB_STOP, 0 },		DEFAULT_MTU, 0 },
-#endif
+{ "arptimeout",		{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_ARPTIMEOUT, MIB_STOP, 0 },        DEFAULT_ARPTIMEOUT, 0 },
+{ "arpdown",		{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_ARPDOWN, MIB_STOP, 0 },           DEFAULT_ARPDOWN, 0 },
+{ "maxqueue",		{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_IPPORT_MAXQUEUE, MIB_STOP, 0 },	DEFAULT_MAXQUEUE, 0 },
+{ "mtudisc",		{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_MTUDISC, MIB_STOP, 0 },		0, 0	},
+{ "mtudisctimeout",	{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_MTUDISCTIMEOUT, MIB_STOP, 0},	DEFAULT_MTUDISCTIMEOUT, 0	},
+{ "ipsec-timeout",	{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_IPSEC_TIMEOUT, MIB_STOP, 0},	DEFAULT_IPSEC_TIMEOUT, 0	},
+{ "ipsec-soft-timeout",	{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_IPSEC_SOFT_TIMEOUT, MIB_STOP, 0},	DEFAULT_IPSEC_SOFT_TIMEOUT, 0	},
+{ "ipsec-allocs",	{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_IPSEC_ALLOCATIONS, MIB_STOP, 0},	0, SYSCTL_VALUE },
+{ "ipsec-soft-allocs",	{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_IPSEC_SOFT_ALLOCATIONS, MIB_STOP, 0}, 0, SYSCTL_VALUE },
+{ "ipsec-bytes",	{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_IPSEC_BYTES, MIB_STOP, 0},	0, SYSCTL_VALUE },
+{ "ipsec-soft-bytes",	{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_IPSEC_SOFT_BYTES, MIB_STOP, 0},	0, SYSCTL_VALUE },
+{ "ipsec-expire-acquire", { CTL_NET, PF_INET, IPPROTO_IP, IPCTL_IPSEC_EXPIRE_ACQUIRE, MIB_STOP, 0}, DEFAULT_IPSEC_EXPIRE_ACQUIRE, 0 },
+{ "ipsec-firstuse",	{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_IPSEC_FIRSTUSE, MIB_STOP, 0}, DEFAULT_IPSEC_FIRSTUSE, 0 },
+{ "ipsec-soft-firstuse",{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_IPSEC_SOFT_FIRSTUSE, MIB_STOP, 0}, DEFAULT_IPSEC_SOFT_FIRSTUSE, 0 },
+{ "ipsec-invalid-life",	{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_IPSEC_EMBRYONIC_SA_TIMEOUT, MIB_STOP, 0}, DEFAULT_IPSEC_INVALID_LIFE, 0 },
+{ "ipsec-pfs",		{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_IPSEC_REQUIRE_PFS, MIB_STOP, 0 },	0, 0 },
+{ "portfirst",		{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_IPPORT_FIRSTAUTO, MIB_STOP, 0 },	DEFAULT_PORTFIRST, 0 },
+{ "portlast",		{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_IPPORT_LASTAUTO, MIB_STOP, 0 },   DEFAULT_PORTLAST, 0 },
+{ "porthifirst",	{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_IPPORT_HIFIRSTAUTO, MIB_STOP, 0 }, DEFAULT_PORTHIFIRST, 0 },
+{ "porthilast",		{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_IPPORT_HILASTAUTO, MIB_STOP, 0 },	DEFAULT_PORTHILAST, 0 },
 { "default-ttl",	{ CTL_NET, PF_INET, IPPROTO_IP, IPCTL_DEFTTL, MIB_STOP, 0 },		DEFAULT_TTL, 0 },
 { 0, { 0, 0, 0, 0, 0, 0 }, 0, 0	}
 };
@@ -116,16 +167,24 @@ struct ipsysctl ip6sysctls[] = {
 { "forwarding",		{ CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_FORWARDING, MIB_STOP, 0 },	0, 1    },
 { "multipath",		{ CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_MULTIPATH, MIB_STOP, 0 },	0, 1	},
 { "mforwarding",	{ CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_MFORWARDING, MIB_STOP, 0 },	0, 1	},
-{ "v6only",		{ CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_V6ONLY, MIB_STOP, 0 },	0, 0	},
-{ "maxifprefixes",	{ CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_MAXIFPREFIXES, MIB_STOP, 0 }, DEFAULT_MAXIFPREFIXES, 0	},
-{ "maxifdefrouters",	{ CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_MAXIFDEFROUTERS, MIB_STOP, 0 }, DEFAULT_MAXIFDEFROUTERS, 0 },
 { "maxdynroutes", 	{ CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_MAXDYNROUTES, MIB_STOP, 0 },	DEFAULT_MAXDYNROUTES, 0 },
+{ "send-redirect",	{ CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_SENDREDIRECTS, MIB_STOP, 0 },0, 0	},
+{ "hoplimit",		{ CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_DEFHLIM, MIB_STOP, 0},	DEFAULT_HLIM, 0 },
+{ "defmcasthlim",       { CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_DEFMCASTHLIM, MIB_STOP, 0},	1, 0	},
+{ "maxfragpackets",     { CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_MAXFRAGPACKETS, MIB_STOP, 0}, DEFAULT_MAXFRAGPACKETS, 0 },
+{ "maxfrags",   	{ CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_MAXFRAGS, MIB_STOP, 0}, DEFAULT_MAXFRAGS, 0 },
+{ "mtudisctimeout",	{ CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_MTUDISCTIMEOUT, MIB_STOP, 0}, DEFAULT_MTUDISCTIMEOUT, 0 },
+{ "multicast_mtudisc",	{ CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_MCAST_PMTU, MIB_STOP, 0}, 0, 1  },
+{ "log_interval",	{ CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_LOG_INTERVAL, MIB_STOP, 0}, DEFAULT_LOG_INTERVAL, 0 },
+{ "auto_flowlabel",	{ CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_AUTO_FLOWLABEL, MIB_STOP, 0}, 0, 0  },
+{ "neighborgcthresh",	{ CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_NEIGHBORGCTHRESH, MIB_STOP, 0 }, DEFAULT_NEIGHBORGCTHRESH , 0 },
+{ "hdrnestlimit",	{ CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_HDRNESTLIMIT, MIB_STOP, 0 }, DEFAULT_HDRNESTLIMIT, 0 },
+{ "dad_count",		{ CTL_NET, PF_INET6, IPPROTO_IPV6, IPV6CTL_DAD_COUNT, MIB_STOP, 0}, DEFAULT_DAD_COUNT, 0 },
 { 0, { 0, 0, 0, 0, 0, 0 }, 0, 0 }
 };
 
 struct ipsysctl mplssysctls[] = {
 { "ttl",		{ CTL_NET, PF_MPLS, MPLSCTL_DEFTTL, MIB_STOP, 0 },			DEFAULT_MTTL, 0	},
-{ "ifq-maxlen",		{ CTL_NET, PF_MPLS, MPLSCTL_IFQUEUE, IFQCTL_MAXLEN, MIB_STOP, 0 },	IFQ_MAXLEN, 0	},
 { "mapttl-ip",		{ CTL_NET, PF_MPLS, MPLSCTL_MAPTTL_IP, MIB_STOP, 0 },			0, 0	},
 { "mapttl-ip6",		{ CTL_NET, PF_MPLS, MPLSCTL_MAPTTL_IP6, MIB_STOP, 0 },			0, 1	},
 { 0, { 0, 0, 0, 0, 0, 0 }, 0, 0 }
@@ -144,29 +203,37 @@ struct ipsysctl pipexsysctls[] = {
 };
 
 int
-ipsysctl(int set, char *cmd, char *arg, int type)
+ipsysctl(int set, char **cmd, ...)
 {
 	int32_t larg;
 	const char *errmsg = NULL;
 	struct ipsysctl *x;
 	struct sysctltab *stab;
+	va_list ap;
+	char *arg;
+	int type;
+
+	va_start(ap, cmd);
+	arg = va_arg(ap, char *);
+	type = va_arg(ap, int);
+	va_end(ap);
 
 	for (stab = sysctls; stab-> name != NULL; stab++)
 		if(stab->pf == type)
 			break;
 	if (stab->pf != type) {
 		printf("%% table lookup failed (%d)\n", type);
-		return 0;
+		return -1;
 	}
 
-	x = (struct ipsysctl *) genget(cmd, (char **)stab->sysctl,
+	x = (struct ipsysctl *) genget(*cmd, (char **)stab->sysctl,
 	    sizeof(struct ipsysctl));
 	if (x == 0) {
-		printf("%% Invalid argument %s\n", cmd);
-		return 0;
+		printf("%% Invalid argument %s\n", *cmd);
+		return -1;
 	} else if (Ambiguous(x)) {
-		printf("%% Ambiguous argument %s\n", cmd);
-		return 0;
+		printf("%% Ambiguous argument %s\n", *cmd);
+		return -1;
 	}
 
 	if (set) {
@@ -175,16 +242,29 @@ ipsysctl(int set, char *cmd, char *arg, int type)
 			if (errmsg) {
 				printf("%% Invalid argument %s: %s\n", arg,
 				    errmsg);
-				return(0);
+				return -1;
 			}
 		} else
 			larg = 1;
 	} else
 		larg = x->def_larg;
 
-	sysctl_int(x->mib, larg, 0);
+	if (candidate) {
+		char line[128];
 
-	return(1);
+		/* the line conf() would print, in place of the sysctl's */
+		sysctl_line(line, sizeof(line), stab->name, x, larg);
+		if (line[0] == '\0')
+			return cand_setting(ST_DEFAULT, "%s %s", stab->name,
+			    x->name);
+		if (strncmp(line, "no ", 3) == 0)
+			return cand_setting(ST_OFF, "%s", line + 3);
+		return cand_setting(ST_ON, "%s", line);
+	}
+	if (sysctl_int(x->mib, larg, 0) == -1)
+		return -1;
+
+	return 0;
 }
 
 void
@@ -199,31 +279,44 @@ conf_sysctls(FILE *output)
 void
 conf_sysctl(FILE *output, char *prefix, struct ipsysctl *x)
 {
-	int tmp = 0;
+	char line[128];
+	int v;
 
-	for (; x != NULL && x->name != NULL; tmp = 0, x++) {
-		if (x->def_larg) {	/* this sysctl takes a value */
-			tmp = sysctl_int(x->mib, 0, 1);
-			if (tmp == x->def_larg || tmp == -1)
-				continue;
-			fprintf(output, "%s %s %i\n", prefix, x->name, tmp);
+	for (; x != NULL && x->name != NULL; x++) {
+		/* -1: this kernel has no such sysctl */
+		if ((v = sysctl_int(x->mib, 0, 1)) == -1)
 			continue;
-		}
-		switch(x->enable) {	/* on/off */
-		case 0:	/* default is enabled */
-			if (sysctl_int(x->mib, 0, 1) == 0)
-				fprintf(output, "no %s %s\n", prefix, x->name);
-			break;
-		case 1: /* default is not enabled */
-			if (sysctl_int(x->mib, 0, 1) == 1)
-				fprintf(output, "%s %s\n", prefix, x->name);
-			break;
-		case 2: /* show either way */
-			if ((tmp = sysctl_int(x->mib, 0, 1)) == 1)
-				fprintf(output, "%s %s\n", prefix, x->name);
-			else if (tmp == 0)
-				fprintf(output, "no %s %s\n", prefix, x->name);
-			break;
-		}
+		sysctl_line(line, sizeof(line), prefix, x, v);
+		if (line[0] != '\0')
+			fprintf(output, "%s\n", line);
+	}
+}
+
+/* The line conf() prints for sysctl x at value v, or "" if none */
+static void
+sysctl_line(char *buf, size_t len, char *prefix, struct ipsysctl *x, int v)
+{
+	buf[0] = '\0';
+	if (x->def_larg || x->enable == SYSCTL_VALUE) {
+		/* this sysctl takes a value */
+		if (v != x->def_larg)
+			snprintf(buf, len, "%s %s %i", prefix, x->name, v);
+		return;
+	}
+	switch(x->enable) {	/* on/off */
+	case 0:	/* default is enabled */
+		if (v == 0)
+			snprintf(buf, len, "no %s %s", prefix, x->name);
+		break;
+	case 1: /* default is not enabled */
+		if (v == 1)
+			snprintf(buf, len, "%s %s", prefix, x->name);
+		break;
+	case 2: /* show either way */
+		if (v == 1)
+			snprintf(buf, len, "%s %s", prefix, x->name);
+		else if (v == 0)
+			snprintf(buf, len, "no %s %s", prefix, x->name);
+		break;
 	}
 }

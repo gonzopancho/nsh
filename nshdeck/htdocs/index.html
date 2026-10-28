@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; form-action 'none'; base-uri 'none'">
+<title>nshdeck</title>
+<link rel="stylesheet" href="xterm/xterm.css">
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script>
+<script src="registry.js" defer></script>
+<script src="inspector.js" defer></script>
+<script src="daemons.js" defer></script>
+<script src="pfconf.js" defer></script>
+<script src="bgpdconf.js" defer></script>
+<script src="routeconf.js" defer></script>
+<script src="stmtconf.js" defer></script>
+<script src="services.js" defer></script>
+<script src="sshconf.js" defer></script>
+<script src="network.js" defer></script>
+<script src="editors.js" defer></script>
+<script src="relations.js" defer></script>
+<script src="sheets.js" defer></script>
+<script src="xterm/xterm.js" defer></script>
+<script src="xterm/addon-fit.js" defer></script>
+<script src="term.js" defer></script>
+</head>
+<body>
+
+<form id="login" hidden>
+<div class="badge">nsh</div>
+<h1>nshdeck</h1>
+<label>User <input name="user" autocomplete="username" required></label>
+<label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+<button class="primary">Log in</button>
+<p class="error" id="login-error"></p>
+</form>
+
+<div id="deck" hidden>
+
+<nav id="rail" aria-label="Workspaces">
+<div class="badge" aria-hidden="true">nsh</div>
+<button type="button" data-ws="overview" title="Overview" aria-label="Overview" class="on">
+<svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+</button>
+<button type="button" data-ws="network" title="Network" aria-label="Network">
+<svg viewBox="0 0 24 24"><path d="M5 8h14v9H5z"/><path d="M9 17v-3h6v3"/><path d="M8 8V5h8v3"/></svg>
+</button>
+<button type="button" data-ws="routing" title="Routing" aria-label="Routing">
+<svg viewBox="0 0 24 24"><circle cx="6" cy="18" r="2"/><circle cx="18" cy="6" r="2"/><path d="M8 18h4a4 4 0 0 0 4-4V8"/><path d="M13 11l3-3 3 3"/></svg>
+</button>
+<button type="button" data-ws="security" title="Security" aria-label="Security">
+<svg viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 5-3 8-7 10-4-2-7-5-7-10V6z"/><path d="M9 12l2 2 4-4"/></svg>
+</button>
+<button type="button" data-ws="services" title="Services" aria-label="Services">
+<svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="5"/><rect x="4" y="11" width="16" height="5"/><path d="M7 19h10"/><circle cx="7" cy="6.5" r=".6"/><circle cx="7" cy="13.5" r=".6"/></svg>
+</button>
+<button type="button" data-ws="system" title="System &amp; Changes" aria-label="System and changes">
+<svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 3-6.2"/><path d="M4 4v4h4"/><path d="M12 8v4l3 2"/></svg>
+</button>
+<button type="button" data-ws="terminal" title="Terminal" aria-label="Terminal">
+<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="14" rx="1"/><path d="M7 9l3 2.5-3 2.5"/><path d="M12 14h5"/><path d="M9 21h6"/></svg>
+</button>
+<span class="fill"></span>
+<button type="button" id="logout" title="Log out" aria-label="Log out">
+<svg viewBox="0 0 24 24"><path d="M10 4H5v16h5"/><path d="M14 8l4 4-4 4"/><path d="M18 12H9"/></svg>
+</button>
+</nav>
+
+<header id="strip">
+<div class="host">
+<span class="led" id="live" title="Notices"></span>
+<strong id="hostname">nshd</strong>
+<span class="dim" id="who"></span>
+</div>
+<div class="run" id="run" hidden>
+<span class="tag" id="gen"></span>
+<span class="dim" id="last-save"></span>
+<span class="health" id="health"></span>
+</div>
+<div class="cand">
+<span class="tag" id="where">not in configure</span>
+<span class="tag" id="changes" hidden></span>
+<button type="button" class="tag warn" id="errors" hidden></button>
+<span class="tag warn" id="deadline" hidden></span>
+</div>
+<div class="actions">
+<button type="button" id="compare">Compare</button>
+<button type="button" id="validate">Validate</button>
+<button type="button" id="commit" class="primary">Commit</button>
+</div>
+</header>
+
+<main>
+
+<section id="ws-overview" class="ws">
+<div class="chassis">
+<div class="ears" aria-hidden="true"></div>
+<div class="plate">
+<span class="brand">nsh</span>
+<span class="model" id="plate-host"></span>
+<span class="serial" id="plate-ver"></span>
+</div>
+<div class="ports" id="ports" aria-label="Physical ports"></div>
+<dl class="readout" aria-label="Summary">
+<dt>Ports</dt><dd id="r-ports">&#8211;</dd>
+<dt>Interfaces</dt><dd id="r-ifs">&#8211;</dd>
+<dt>Addresses</dt><dd id="r-addrs">&#8211;</dd>
+<dt>Last change</dt><dd id="r-last">none seen</dd>
+</dl>
+<div class="status" aria-label="Status">
+<span title="nshdeck is up"><i class="led on"></i>PWR</span>
+<span title="Notices from nshd"><i class="led" id="led-sys"></i>SYS</span>
+<span title="Uncommitted changes"><i class="led" id="led-cfg"></i>CFG</span>
+<span title="A commit waits to be confirmed"><i class="led" id="led-cnf"></i>CNF</span>
+</div>
+<div class="ears" aria-hidden="true"></div>
+</div>
+<div class="tray" id="tray" hidden></div>
+<div class="logical" id="logical"></div>
+</section>
+
+<section id="ws-network" class="ws" hidden>
+<div class="bar">
+<div class="seg" id="net-topics" role="radiogroup" aria-label="Section">
+<label><input type="radio" name="net" value="ports" checked><span>Ports &amp; interfaces</span></label>
+<label><input type="radio" name="net" value="switching"><span>Switching</span></label>
+<label><input type="radio" name="net" value="routes"><span>Routing tables &amp; routes</span></label>
+<label><input type="radio" name="net" value="ha"><span>HA &amp; tunnels</span></label>
+</div>
+<span class="dim" id="net-count"></span></div>
+<div class="netsplit">
+<div>
+<table class="grid pick" id="if-table"></table>
+<div id="net-other" hidden></div>
+</div>
+<aside id="inspector" class="panel" aria-label="The inspector">
+<p class="dim">Choose an interface.</p>
+</aside>
+</div>
+<div class="shows" data-presets="interface|ip|vlan|bridge|arp 0|ndp 0|autoconf"></div>
+</section>
+
+<section id="ws-routing" class="ws" hidden>
+<div class="daemons" data-ws="routing"></div>
+<div class="shows" data-presets="route inet 0|route inet6 0|arp 0|ndp 0"></div>
+</section>
+
+<section id="ws-security" class="ws" hidden>
+<div class="daemons" data-ws="security"></div>
+<div class="shows" data-presets="sadb|users"></div>
+</section>
+
+<section id="ws-services" class="ws" hidden>
+<div class="daemons" data-ws="services"></div>
+<div class="shows" data-presets="dhcp leases|users"></div>
+</section>
+
+<section id="ws-system" class="ws" hidden>
+<div class="bar">
+<div class="seg" id="topics" role="radiogroup" aria-label="Topic">
+<label><input type="radio" name="topic" value="changes" checked><span>Changes</span></label>
+<label><input type="radio" name="topic" value="history"><span>History</span></label>
+<label><input type="radio" name="topic" value="jobs"><span>Jobs &amp; MOTD</span></label>
+<label><input type="radio" name="topic" value="live"><span>Live operations</span></label>
+<label><input type="radio" name="topic" value="errors"><span>Errors</span></label>
+</div>
+</div>
+
+<div class="topic" id="topic-changes">
+<div class="split">
+<div class="panel">
+<div class="bar"><h2>Candidate</h2>
+<form id="configure-form" class="inline">
+<div class="seg" role="radiogroup" aria-label="Configure mode">
+<label><input type="radio" name="mode" value="private" checked><span>private</span></label>
+<label><input type="radio" name="mode" value="shared"><span>shared</span></label>
+<label><input type="radio" name="mode" value="exclusive"><span>exclusive</span></label>
+<label><input type="radio" name="mode" value="terminal"><span>terminal</span></label>
+</div>
+<button id="enter">Enter</button>
+<button type="button" id="discard" disabled>Discard changes</button>
+<button type="button" id="exit" disabled>Exit</button>
+</form>
+</div>
+<p class="help" id="mode-help"></p>
+<pre id="transcript" class="term"></pre>
+<p class="empty">Type a line as at nsh's configure prompt, such as <code>hostname gw1</code>, or <code>interface em0</code> and then <code>description uplink</code>. Tab completes a word; <code>?</code> lists what can come next.</p>
+<form id="line-form" class="cliline">
+<span id="prompt">nsh&gt;</span>
+<input name="line" class="cli" aria-label="A line of configuration" autocomplete="off" spellcheck="false">
+</form>
+</div>
+<div class="panel">
+<div class="bar"><h2>View</h2>
+<form id="config-form" class="inline">
+<div class="seg" role="radiogroup" aria-label="Which configuration">
+<label><input type="radio" name="what" value="diff" checked><span>changes</span></label>
+<label><input type="radio" name="what" value="candidate"><span>candidate</span></label>
+<label><input type="radio" name="what" value="running"><span>running</span></label>
+<label><input type="radio" name="what" value="startup"><span>saved</span></label>
+</div>
+</form>
+</div>
+<p class="help" id="view-help"></p>
+<pre id="config-out" class="term tall"></pre>
+<p class="empty" id="config-empty"></p>
+</div>
+</div>
+</div>
+
+<div class="topic" id="topic-history" hidden>
+<div class="split">
+<div class="panel">
+<div class="bar"><h2>Saved configurations</h2><span class="dim" id="saved-count"></span></div>
+<p class="help">Newest first. The arrow shows what a commit changed; choose a row to see or load it.</p>
+<table class="grid pick" id="saved-table"></table>
+<p class="empty">No configuration has been saved yet.</p>
+</div>
+<div class="panel">
+<div class="bar"><h2 id="saved-name">Saved configuration</h2>
+<span class="fill"></span>
+<button type="button" id="load" disabled>Load into the candidate</button>
+</div>
+<p class="help" id="load-help">To load one, enter configure under Changes.</p>
+<pre id="saved-out" class="term tall"></pre>
+<p class="empty">Choose a saved configuration to see it here.</p>
+</div>
+</div>
+<div class="split">
+<div class="panel">
+<div class="bar"><h2>Activity</h2></div>
+<p class="help">Commits, confirmed commits, configure exclusive, and interface and route changes, as they happen.</p>
+<ul id="notices"></ul>
+<p class="empty">Nothing yet since this page opened.</p>
+</div>
+<div class="panel">
+<div class="bar"><h2>Logs</h2>
+<form id="events-form" class="inline">
+<label><input type="checkbox" name="logs" value="daemon"> daemon</label>
+<label><input type="checkbox" name="logs" value="messages"> messages</label>
+<label><input type="checkbox" name="logs" value="pflog"> pflog</label>
+<button>Follow</button>
+</form>
+</div>
+<p class="help">Check logs, then Follow.</p>
+<pre id="log" class="term"></pre>
+<p class="empty">No log followed.</p>
+</div>
+</div>
+</div>
+
+<div class="topic" id="topic-jobs" hidden>
+<div class="daemons" data-ws="system"></div>
+</div>
+
+<div class="topic" id="topic-errors" hidden>
+<div class="panel">
+<div class="bar"><h2>Errors</h2><span class="dim count" id="errors-count"></span><span class="fill"></span><button type="button" id="errors-clear">Clear</button></div>
+<p class="help">What nshd refused, newest first, until the same request succeeds, or a commit or rollback does. Choose one to go where it was made.</p>
+<table class="grid pick" id="errors-table"></table>
+<p class="empty">No errors.</p>
+</div>
+</div>
+
+<div class="topic" id="topic-live" hidden>
+<div class="panel">
+<div class="bar"><h2>Live operations</h2><span class="tag warn">Live operation</span></div>
+<p class="help">These act on the running system at once; Discard and rollbacks do not undo them. Each needs the operate permission. The number beside Run is the routing table.</p>
+<table class="grid pick" id="op-kinds"></table>
+<form id="op-form" class="cliline">
+<span>op&gt;</span>
+<input name="line" class="cli" aria-label="Operation" autocomplete="off" spellcheck="false" placeholder="an operation, such as flush arp">
+<input name="rtable" type="number" min="0" max="255" value="0" aria-label="Routing table" title="The routing table it runs in" class="narrow">
+<button>Run&#8230;</button>
+</form>
+<pre id="op-out" class="term"></pre>
+<p class="empty">What an operation prints shows here.</p>
+</div>
+</div>
+
+<div class="shows" data-presets="version|hostname|users"></div>
+</section>
+
+<section id="ws-terminal" class="ws" hidden>
+<div class="bar"><h2>Terminal</h2>
+<span class="led" id="term-led"></span>
+<span class="dim" id="term-state">not connected</span>
+<span class="fill"></span>
+<button type="button" id="term-connect" class="primary">Connect</button>
+<button type="button" id="term-end" disabled>Disconnect</button>
+</div>
+<div id="term"></div>
+</section>
+
+</main>
+</div>
+
+<div id="choices" role="listbox" aria-label="Choices" hidden></div>
+
+<dialog id="commit-dialog">
+<form id="commit-form">
+<h2>Commit the candidate</h2>
+<label>Comment <input name="comment" maxlength="255"></label>
+<label class="row"><input type="checkbox" name="confirmed"> confirmed, within
+<input name="minutes" type="number" min="1" max="1440" value="5" class="narrow"> minutes</label>
+<p class="dim">It rolls back unless you commit again before then.</p>
+<div class="actions">
+<button type="button" id="commit-cancel">Cancel</button>
+<button class="primary">Commit</button>
+</div>
+</form>
+</dialog>
+
+<dialog id="op-dialog">
+<form id="op-confirm">
+<h2>Run a live operation</h2>
+<pre class="term" id="op-line"></pre>
+<p class="dim">This acts on the running system now. Discard and rollbacks do not undo it.</p>
+<div class="actions">
+<button type="button" id="op-cancel">Cancel</button>
+<button class="primary">Run</button>
+</div>
+</form>
+</dialog>
+
+</body>
+</html>
